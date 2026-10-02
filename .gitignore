@@ -1,0 +1,4 @@
+__pycache__/
+*.pyc
+tests/_refboard_probe_out.txt
+tests/_refboard_shot.png
