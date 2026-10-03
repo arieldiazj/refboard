@@ -1839,6 +1839,40 @@ def main():
           len(scene.refboard_items) == base_n + 1 and
           scene.refboard_items[-1].image is not None)
 
+    # Blender's memfile undo still snapshots refboard_items with the
+    # scene - the undo_post guard re-pins the board to `prev` so the two
+    # undo systems stay independent. Step the board to a known state,
+    # then let a real ed.undo try to roll it back.
+    it2 = scene.refboard_items[-1]
+    it2.pos = (0.15, 0.15)
+    ct._refboard_undo_push("T")
+    bpy.ops.ed.undo_push(message="B")
+    it3 = scene.refboard_items[-1]
+    it3.pos = (0.95, 0.95)
+    ct._refboard_undo_push("T")
+    f0 = scene.frame_current
+    scene.frame_current = f0 + 10
+    did = False
+    try:
+        bpy.ops.ed.undo()
+        did = True
+    except Exception:
+        pass
+    if did:
+        check("blender undo rolled scene state",
+              scene.frame_current == f0,
+              "%d -> %d" % (f0, scene.frame_current))
+        it4 = scene.refboard_items[-1]
+        check("guard kept the board pinned through blender undo",
+              abs(it4.pos[0] - 0.95) < 1e-6, str(tuple(it4.pos)))
+    else:
+        scene.refboard_items.clear()
+        ct._refboard_undo_post_guard()
+        it4 = scene.refboard_items[-1] if len(
+            scene.refboard_items) else None
+        check("guard re-pins board state (fallback path)",
+              it4 is not None and abs(it4.pos[0] - 0.95) < 1e-6)
+
     # ------------------------------------------------------------------
     print(f"\n=== RESULT: {PASS_COUNT} passed, {FAIL_COUNT} failed ===",
           flush=True)

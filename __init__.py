@@ -3640,6 +3640,27 @@ def _refboard_undo_step(scene, redo=False):
     return True
 
 
+@persistent
+def _refboard_undo_post_guard(*args):
+    """Blender's memfile undo snapshots refboard_items along with the rest
+    of the scene, so a scene-level Ctrl+Z would roll the board back too.
+    After each undo/redo, re-pin the board to our stack's resting state
+    (`prev`) whenever the memfile restore drifted it - the two undo
+    systems stay fully independent."""
+    try:
+        scene = getattr(bpy.context, "scene", None)
+        if scene is None:
+            return
+        _refboard_undo_seed(scene)
+        prev = _refboard_undo["prev"]
+        if prev is None or _refboard_board_state(scene) == prev:
+            return
+        _refboard_apply_board_state(scene, prev)
+        _refboard_redraw_views()
+    except Exception:
+        pass
+
+
 def _refboard_delete_selected(scene):
     sel = scene.refboard_selected
     if 0 <= sel < len(scene.refboard_items):
@@ -5077,6 +5098,8 @@ def register():
         update=lambda self, context: _refboard_redraw_views())
     bpy.app.handlers.load_post.append(_refboard_load_post)
     bpy.app.handlers.save_pre.append(_refboard_save_pre)
+    bpy.app.handlers.undo_post.append(_refboard_undo_post_guard)
+    bpy.app.handlers.redo_post.append(_refboard_undo_post_guard)
 
     _refboard_kick_boot_timer()
 
@@ -5152,6 +5175,12 @@ def unregister():
         bpy.app.handlers.save_pre.remove(_refboard_save_pre)
     except ValueError:
         pass
+
+    for h in (bpy.app.handlers.undo_post, bpy.app.handlers.redo_post):
+        try:
+            h.remove(_refboard_undo_post_guard)
+        except ValueError:
+            pass
 
     global _refboard_drag, _refboard_modal_running, _refboard_hover
     global _refboard_opacity_label, _refboard_pan_drag, _refboard_marquee
