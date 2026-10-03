@@ -1573,6 +1573,24 @@ def main():
         threw = True
     check("undecodable paste refused", threw and
           len(scene.refboard_items) == n0)
+    # Icon-size floor: a tiny clipboard image is refused, but the same file
+    # delivered as a *drop* (filepath set) is accepted - drops are intent.
+    tiny = make_png(os.path.join(tmp, "tiny.png"), w=16, h=16)
+    threw = False
+    try:
+        ct._refboard_finish({"dst": tiny, "mode": 'SCREEN',
+                             "state": {"scene": scene,
+                                       "clipboard": True}})
+    except Exception:
+        threw = True
+    check("icon-size clipboard paste refused", threw and
+          len(scene.refboard_items) == n0)
+    big = make_png(os.path.join(tmp, "big.png"), w=96, h=96)
+    ct._refboard_finish({"dst": big, "mode": 'SCREEN',
+                         "state": {"scene": scene, "clipboard": True}})
+    check("normal clipboard paste lands", len(scene.refboard_items) == n0 + 1)
+    # Restore the empty board P8's hardcoded item count expects.
+    scene.refboard_items.remove(len(scene.refboard_items) - 1)
 
     section("P7 clipboard image gate")
     if ct.platform.system() == "Windows":

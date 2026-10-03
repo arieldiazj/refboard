@@ -590,6 +590,36 @@ class RefboardItem(bpy.types.PropertyGroup):
 
 # --- clipboard plumbing (ported from ad_quick_paste) -------------------------
 
+def _refboard_clipboard_formats():
+    """Formats physically present on the clipboard, via EnumClipboardFormats.
+
+    IsClipboardFormatAvailable *synthesizes* - a lone CF_BITMAP (an app
+    thumbnail, a file icon, .NET's SetImage) reports CF_DIB available and
+    GetClipboardData converts it into a fake image. Only formats in this
+    enumeration are real."""
+    fmts = set()
+    fmt = 0
+    while True:
+        fmt = _refboard_u32.EnumClipboardFormats(fmt)
+        if not fmt:
+            break
+        fmts.add(fmt)
+    return fmts
+
+
+def _refboard_clipboard_is_files(fmts):
+    """True when the clipboard describes files/OLE objects rather than an
+    image: the bitmap riding along in those is the item's icon."""
+    if 15 in fmts:                                   # CF_HDROP
+        return True
+    for name in ("FileGroupDescriptor", "FileGroupDescriptorW",
+                 "FileContents", "Object Descriptor"):
+        fmt = _refboard_u32.RegisterClipboardFormatW(name)
+        if fmt and fmt in fmts:
+            return True
+    return False
+
+
 def _refboard_clipboard_has_image():
     """True when the OS clipboard can currently serve an image.
 
@@ -612,15 +642,13 @@ def _refboard_clipboard_has_image():
             fmt = _refboard_u32.RegisterClipboardFormatW(name)
             if fmt and _refboard_u32.IsClipboardFormatAvailable(fmt):
                 return True
-        # CF_HDROP means the clipboard holds *files*; the bitmap beside it
-        # is the file's icon, not something the user expects to paste.
-        if _refboard_u32.IsClipboardFormatAvailable(15):
+        fmts = _refboard_clipboard_formats()
+        if _refboard_clipboard_is_files(fmts):
             return False
-        # CF_DIBV5, CF_DIB, CF_BITMAP - bitmaps synthesize to DIB on read.
-        for fmt in (17, 8, 2):
-            if _refboard_u32.IsClipboardFormatAvailable(fmt):
-                return True
-        return False
+        # A real DIBV5/DIB on the clipboard, or a bare CF_BITMAP: the lone
+        # bitmap can be a genuine image (WinForms copies) or an icon - the
+        # decoded-size floor in _refboard_finish sorts that out.
+        return bool(fmts & {17, 8, 2})
     finally:
         _refboard_u32.CloseClipboard()
 
@@ -742,8 +770,8 @@ def _refboard_clipboard_image_win(dst_base):
                 with open(out, "wb") as f:
                     f.write(raw)
                 return out
-        # CF_HDROP + a bitmap = a file's icon, not a pasted image.
-        if not _refboard_u32.IsClipboardFormatAvailable(15):
+        # A file/OLE clipboard's bitmap is the item's icon - skip it.
+        if not _refboard_clipboard_is_files(_refboard_clipboard_formats()):
             for fmt in (17, 8):          # CF_DIBV5, CF_DIB
                 raw = _refboard_clip_read_fmt(fmt)
                 if raw:
@@ -2667,15 +2695,20 @@ def _refboard_finish(p):
         return
     img = _refboard_adopt(dst)
     # size access forces the lazy decode: a garbage payload keeps (0, 0).
-    if img.size[0] <= 0 or img.size[1] <= 0:
-        # A clipboard payload that looks like an image but decodes to
-        # nothing would draw as a flat magenta quad at default scale -
-        # scrap the datablock and fail the paste instead.
+    bad = img.size[0] <= 0 or img.size[1] <= 0
+    icon = (not bad and st.get("clipboard") and
+            max(img.size[0], img.size[1]) <= 64)
+    if bad or icon:
+        # Undecodable payloads would draw as a flat magenta quad; icon-size
+        # clipboard bitmaps (file/OLE icon side-channels) pasting as refs
+        # are never what the user meant. Scrap the datablock either way.
         try:
             bpy.data.images.remove(img)
         except Exception:
             pass
-        raise RuntimeError("clipboard image could not be decoded")
+        raise RuntimeError(
+            "clipboard image could not be decoded" if bad else
+            "clipboard image looks like an icon (<=64px)")
     if not st.get("filepath") and not img.name.startswith("Refboard"):
         img.name = "Refboard"
     if p["mode"] == 'SCREEN':
@@ -4677,6 +4710,9 @@ class REFBOARD_OT_do_paste(bpy.types.Operator):
         dst = os.path.join(
             tempfile.gettempdir(),
             "refboard_%s.png" % uuid.uuid4().hex)
+        # Clipboard-origin pastes get the icon-size floor at finish; drops
+        # (state.filepath) keep accepting small files on purpose.
+        st["clipboard"] = True
         # In-process clipboard read lands in ~ms, so the ref appears
         # immediately with no progress bar at all.
         if platform.system() == "Windows":
