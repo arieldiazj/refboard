@@ -1835,8 +1835,45 @@ def main():
     check("group front keeps order",
           scene.refboard_items[new[0]] == mem_a and
           scene.refboard_items[new[1]] == mem_b)
-    for i in range(3):
-        scene.refboard_items.remove(len(scene.refboard_items) - 1)
+
+    # refboard.depth operator (ctx menu entries + the [ ] bindings):
+    # with no mouse ctx it restacks the current selection, and the
+    # marquee group path restacks the whole group. items.move()
+    # reallocates collection storage, so the three members are tagged
+    # by opacity rather than compared by struct identity.
+    saved_ctx = dict(ct._refboard_ctx)
+    ct._refboard_ctx.clear()
+    ct._refboard_group = []
+    n_items = len(scene.refboard_items)
+    scene.refboard_items[0].opacity = 0.42          # the moved member
+    scene.refboard_items[n_items - 2].opacity = 0.43
+    scene.refboard_items[n_items - 1].opacity = 0.44
+    try:
+        scene.refboard_selected = 0
+        bpy.ops.refboard.depth('EXEC_DEFAULT', front=True)
+        last = len(scene.refboard_items) - 1
+        check("depth op brings selection to front",
+              abs(scene.refboard_items[last].opacity - 0.42) < 1e-6
+              and scene.refboard_selected == last)
+        bpy.ops.refboard.depth('EXEC_DEFAULT', front=False)
+        check("depth op sends selection to back",
+              abs(scene.refboard_items[0].opacity - 0.42) < 1e-6
+              and scene.refboard_selected == 0)
+        ct._refboard_group = [len(scene.refboard_items) - 2,
+                              len(scene.refboard_items) - 1]
+        bpy.ops.refboard.depth('EXEC_DEFAULT', front=False)
+        check("depth op sends group to back",
+              sorted(ct._refboard_group) == [0, 1]
+              and abs(scene.refboard_items[0].opacity - 0.43) < 1e-6
+              and abs(scene.refboard_items[1].opacity - 0.44) < 1e-6,
+              str(ct._refboard_group))
+    finally:
+        ct._refboard_group = []
+        ct._refboard_ctx.clear()
+        ct._refboard_ctx.update(saved_ctx)
+        for i in range(len(scene.refboard_items) - 1, -1, -1):
+            if scene.refboard_items[i].opacity < 0.5:
+                scene.refboard_items.remove(i)
 
     # Reset Image: rotation/flips/opacity back to neutral and the full
     # frame restored; size and position are kept.

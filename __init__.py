@@ -4779,6 +4779,17 @@ class REFBOARD_MT_ctx(bpy.types.Menu):
     def draw(self, context):
         col = self.layout.column()
         col.menu("REFBOARD_MT_arrange")
+        scene = context.scene
+        en = bool(_refboard_group) or \
+            0 <= scene.refboard_selected < len(scene.refboard_items)
+        row = col.row()
+        row.enabled = en
+        row.operator("refboard.depth",
+                     text="Bring to Front").front = True
+        row = col.row()
+        row.enabled = en
+        row.operator("refboard.depth",
+                     text="Send to Back").front = False
         col.separator()
         col.operator("refboard.reset", text="Reset (Full)")
         col.operator("refboard.reset_crop", text="Reset (Cropping Only)")
@@ -4817,7 +4828,7 @@ def _refboard_ctx_target(scene, region):
     the current selection."""
     idx = scene.refboard_selected
     mouse = _refboard_ctx.get("mouse")
-    if mouse is not None:
+    if mouse is not None and region is not None:
         hit = _refboard_pick(scene, region, mouse[0], mouse[1])
         if hit is not None and isinstance(hit[0], int):
             idx = hit[0]
@@ -4861,6 +4872,34 @@ class REFBOARD_OT_reset_crop(bpy.types.Operator):
         if _refboard_reset_crop(scene, idx):
             scene.refboard_selected = idx
             _refboard_undo_push("Refboard Reset Crop")
+            _refboard_redraw_views()
+        return {'FINISHED'}
+
+
+class REFBOARD_OT_depth(bpy.types.Operator):
+    """Restack the ref under the cursor, or the whole marquee group:
+    send it to the back of the draw order or bring it to the front."""
+    bl_idname = "refboard.depth"
+    bl_label = "Refboard Depth"
+    bl_options = {'INTERNAL'}
+
+    front: bpy.props.BoolProperty(default=True)
+
+    def execute(self, context):
+        global _refboard_group
+        scene = context.scene
+        region = _refboard_ctx.get("region") or context.region
+        if _refboard_group:
+            _refboard_group = _refboard_move_depth(
+                scene, _refboard_group, self.front)
+            _refboard_undo_push("Refboard Depth")
+            _refboard_redraw_views()
+            return {'FINISHED'}
+        idx = _refboard_ctx_target(scene, region)
+        new = _refboard_move_depth(scene, [idx], self.front)
+        if new:
+            scene.refboard_selected = new[0]
+            _refboard_undo_push("Refboard Depth")
             _refboard_redraw_views()
         return {'FINISHED'}
 
@@ -5435,6 +5474,7 @@ classes = (
     REFBOARD_OT_update_check,
     REFBOARD_OT_reset,
     REFBOARD_OT_reset_crop,
+    REFBOARD_OT_depth,
     REFBOARD_MT_paste,
     REFBOARD_MT_arrange,
     REFBOARD_MT_ctx,
@@ -5517,6 +5557,17 @@ def register():
                 "refboard.toggle", type='ACCENT_GRAVE', value='PRESS',
                 alt=True)
             kmi.properties.alt = True
+            _refboard_keymaps.append((km, kmi))
+            # [ / ] restack (Figma-style). The modal handles these first
+            # while it runs; binding them is what lets the ctx menu draw
+            # the shortcut on the right like stock Blender menus.
+            kmi = km.keymap_items.new(
+                "refboard.depth", type='RIGHT_BRACKET', value='PRESS')
+            kmi.properties.front = True
+            _refboard_keymaps.append((km, kmi))
+            kmi = km.keymap_items.new(
+                "refboard.depth", type='LEFT_BRACKET', value='PRESS')
+            kmi.properties.front = False
             _refboard_keymaps.append((km, kmi))
         except Exception as e:
             print("Refboard: could not register keymap:", e)
