@@ -1002,6 +1002,24 @@ def _refboard_canvas_mode(scene):
     return items is not None and len(items) > 0
 
 
+def _refboard_enter_object_mode():
+    """Drop the active object back to Object Mode when Refboard edit mode
+    starts. Object-mode undo is the memfile stack our undo_post guard
+    re-pins against; Sculpt Mode has its own non-memfile undo that shares
+    the same Ctrl+Z binding, so leaving it active in the background makes
+    swallowed keys ambiguous - a Z that ever falls through steps sculpt
+    history instead of board history."""
+    obj = getattr(bpy.context, "active_object", None)
+    if obj is None or getattr(obj, "mode", "OBJECT") == 'OBJECT':
+        return
+    try:
+        with bpy.context.temp_override(
+                object=obj, active_object=obj):
+            bpy.ops.object.mode_set(mode='OBJECT')
+    except Exception:
+        pass
+
+
 def _refboard_switch_mode(scene, alt):
     """The ` / Alt+` mode switch, shared by the modal and the keymap items so
     the two can never drift apart.
@@ -1022,6 +1040,7 @@ def _refboard_switch_mode(scene, alt):
         _refboard_mode_label = "Refboard Exit"
     elif alt:
         scene.refboard_all_hidden = False
+        _refboard_enter_object_mode()
         _refboard_canvas_on = True
         _refboard_npanel_hide()
         _refboard_undo_seed(scene)
@@ -2655,6 +2674,7 @@ def _refboard_finish(p):
         # Pasting drops straight into canvas Edit mode with the new ref
         # selected; flash the mode label and pop the help block.
         _refboard_canvas_on = True
+        _refboard_enter_object_mode()
         _refboard_npanel_hide()
         scene.refboard_all_hidden = False
         _refboard_mode_ts = _refboard_help_ts = time.time()
@@ -3758,7 +3778,7 @@ def _refboard_boot_timer():
         if len(getattr(sc, "refboard_items", ())) > 0:
             any_items = True
             break
-    if not any_items:
+    if not any_items and not _refboard_canvas_on:
         return None
     _refboard_ensure_modal()
     return None if _refboard_modal_running else 0.5
@@ -3779,8 +3799,12 @@ class REFBOARD_OT_interact(bpy.types.Operator):
 
     def invoke(self, context, event):
         global _refboard_modal_running
-        _refboard_modal_running = True
         context.window_manager.modal_handler_add(self)
+        # Flag the modal as live only after the handler is really added -
+        # otherwise a failed add leaves _refboard_modal_running stuck True
+        # and _refboard_ensure_modal never retries, silently killing all
+        # board input (including edit-mode undo) for the session.
+        _refboard_modal_running = True
         return {'RUNNING_MODAL'}
 
     def modal(self, context, event):
