@@ -3044,14 +3044,44 @@ def _refboard_drag_update(scene, region, mx, my, event=None):
         nu = _refboard_screen_to_uv(item, region, scene,
                                     emx + nx, emy + ny)
         du, dv = nu[0] - mu[0], nu[1] - mu[1]
-        # Both endpoints take the same delta, so the edge always slides
-        # parallel to itself. Clamp `off` to the range where BOTH stay
-        # inside the texture square: the slide stops the moment the first
-        # corner touches an image border - letting the free endpoint run
-        # on is what skewed the edge.
-        lo, hi = -1e30, 1e30
-        for p in (pts[ai], pts[bi]):
-            for coord, delta in ((p[0], du), (p[1], dv)):
+        # Per-corner slide deltas. Inward both take the shared normal
+        # step so the edge stays parallel to itself. Outward (extending
+        # an already-cropped edge back out) each corner instead rides its
+        # ADJACENT side border's line: the quad grows along its own side
+        # walls, so a corner can never shear across a side edge - and the
+        # walls carry the corners to the original image border, which is
+        # where the extension stops (never into empty canvas).
+        da = db = (du, dv)
+        lo2 = -1e30
+        if off < 0.0:
+            exu = pts[bi][0] - pts[ai][0]
+            eyu = pts[bi][1] - pts[ai][1]
+            cde = du * eyu - dv * exu
+            # ai's side wall runs prev->ai (ends at ai); bi's runs
+            # bi->next (starts at bi). Extend each past the corner.
+            for k, o in ((ai, (ai - 1) % 4), (bi, (bi + 1) % 4)):
+                wx = pts[k][0] - pts[o][0]
+                wy = pts[k][1] - pts[o][1]
+                cwe = wx * eyu - wy * exu
+                if abs(cde) > 1e-12 and abs(cwe) > 1e-12:
+                    f = cde / cwe
+                    if k == ai:
+                        da = (wx * f, wy * f)
+                    else:
+                        db = (wx * f, wy * f)
+            # Side walls converging outward meet at an apex: stop before
+            # the moving edge collapses to a point and the quad inverts.
+            elu = math.hypot(exu, eyu)
+            cff = (db[0] - da[0]) * exu + (db[1] - da[1]) * eyu
+            if elu > 1e-9 and cff > 1e-12:
+                lo2 = -(elu * elu * 0.999) / cff
+        # Clamp `off` to the range where BOTH moved corners stay inside
+        # the texture square: the slide stops the moment the first corner
+        # touches an image border - letting the free endpoint run on is
+        # what skewed the edge.
+        lo, hi = lo2, 1e30
+        for p2, dd in ((pts[ai], da), (pts[bi], db)):
+            for coord, delta in ((p2[0], dd[0]), (p2[1], dd[1])):
                 if delta > 1e-12:
                     hi = min(hi, (1.0 - coord) / delta)
                     lo = max(lo, -coord / delta)
@@ -3091,8 +3121,8 @@ def _refboard_drag_update(scene, region, mx, my, event=None):
                     elif c0 < -1e-7:
                         off = 0.0
         pa, pb = pts[ai], pts[bi]
-        pts[ai] = (pa[0] + du * off, pa[1] + dv * off)
-        pts[bi] = (pb[0] + du * off, pb[1] + dv * off)
+        pts[ai] = (pa[0] + da[0] * off, pa[1] + da[1] * off)
+        pts[bi] = (pb[0] + db[0] * off, pb[1] + db[1] * off)
         _refboard_crop_commit(item, pts)
 
 

@@ -824,6 +824,70 @@ def main():
                                (0.0, 0.0, 1.0, 1.0), 1.0,
                                (0.0, 0.0, 1.0, 0.0, 1.0, 1.0, 0.0, 1.0)))
 
+    # Re-EXTEND an edge on a rotated+marquee-cropped ref: each moving
+    # corner must ride its adjacent side border's line, so the quad grows
+    # along its own walls. The edge can never shear a corner across a
+    # side edge, and the walls stop it at the image border - never into
+    # empty canvas. Drag the right edge (sub 2 = pts 1-2) far outward.
+    item.pos = (0.5, 0.5)
+    item.rotation = _m.radians(40.0)
+    base_pts = [(0.15, 0.30), (0.60, 0.05), (0.85, 0.60), (0.40, 0.85)]
+    ct._refboard_crop_commit(item, base_pts)
+    bcx = sum(p[0] for p in base_pts) * 0.25
+    bcy = sum(p[1] for p in base_pts) * 0.25
+    q3 = ct._refboard_crop_quad(item, reg, item.image)
+    emx = (q3[1][0] + q3[2][0]) * 0.5
+    emy = (q3[1][1] + q3[2][1]) * 0.5
+    ex, ey = q3[2][0] - q3[1][0], q3[2][1] - q3[1][1]
+    el = _m.hypot(ex, ey)
+    nx, ny = -ey / el, ex / el
+    qcx = sum(p[0] for p in q3) * 0.25
+    qcy = sum(p[1] for p in q3) * 0.25
+    if (emx - qcx) * nx + (emy - qcy) * ny < 0:
+        nx, ny = -nx, -ny   # normal points away from quad centre = outward
+    tx, ty = emx + nx * 500.0, emy + ny * 500.0   # drag far outward
+    ct._refboard_drag_set({
+        "index": 0, "mode": 'crop', "sub": 2, "temp": False,
+        "moved": False, "m0": (emx, emy), "snap": ct._refboard_snapshot(item),
+        "pos0": tuple(item.pos), "scale0": (1.0, 1.0),
+        "rot0": item.rotation,
+        "crop0": tuple(item.crop), "local0": (0.0, 0.0),
+        "crop_uv0": tuple(v for p in ct._refboard_crop_uvs(item) for v in p),
+        "angle0": 0.0, "dist0": 1.0, "screen_dist0": 1.0})
+    ct._refboard_drag_update(scene, reg, tx, ty)
+    pts3 = [tuple(p) for p in ct._refboard_crop_uvs(item)]
+
+    def _on_line(pt, a, b, tol=1e-6):
+        return abs((b[0] - a[0]) * (pt[1] - a[1]) -
+                   (b[1] - a[1]) * (pt[0] - a[0])) < tol
+
+    # corner 1 rides the p0-p1 side wall; corner 2 rides the p2-p3 wall
+    check("extend corners ride side walls",
+          _on_line(pts3[1], base_pts[0], base_pts[1]) and
+          _on_line(pts3[2], base_pts[2], base_pts[3]), str(pts3))
+    signs3 = []
+    for i in range(4):
+        a, b, c = pts3[i], pts3[(i + 1) % 4], pts3[(i + 2) % 4]
+        signs3.append((b[0] - a[0]) * (c[1] - b[1]) -
+                      (b[1] - a[1]) * (c[0] - b[0]))
+    check("extend quad stays convex (no bowtie)",
+          all(x > -1e-9 for x in signs3) or
+          all(x < 1e-9 for x in signs3), str(signs3))
+    check("extend stays inside texture",
+          all(-1e-6 <= u <= 1.0 + 1e-6 and -1e-6 <= v <= 1.0 + 1e-6
+              for u, v in pts3), str(pts3))
+    m0x = (base_pts[1][0] + base_pts[2][0]) * 0.5
+    m0y = (base_pts[1][1] + base_pts[2][1]) * 0.5
+    m1x = (pts3[1][0] + pts3[2][0]) * 0.5
+    m1y = (pts3[1][1] + pts3[2][1]) * 0.5
+    check("extend edge actually moved outward",
+          (m1x - m0x) * (m0x - bcx) + (m1y - m0y) * (m0y - bcy) > 1e-4,
+          f"{m0x:.3f},{m0y:.3f} -> {m1x:.3f},{m1y:.3f}")
+    ct._refboard_drag_set(None)
+    ct._refboard_restore(item, ((0.5, 0.5), (1.0, 1.0), 0.0,
+                               (0.0, 0.0, 1.0, 1.0), 1.0,
+                               (0.0, 0.0, 1.0, 0.0, 1.0, 1.0, 0.0, 1.0)))
+
     # Rotated + off-center marquee crop: rotate and center-scale must
     # pivot on the CROP quad's centroid, not the uncropped image center
     # (pos) - the visible chunk must not orbit or drift.
