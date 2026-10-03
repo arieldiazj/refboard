@@ -2408,23 +2408,21 @@ def _draw_refboard():
                     xs = [q[0] for q in quad]
                     ys = [q[1] for q in quad]
                     text = f"{round(op * 100)}%"
+                    cap = ("Global " if lidx == -1 and not _refboard_group
+                           else "") + attr.capitalize()
                     cx = (min(xs) + max(xs)) * 0.5
                     blf.size(0, 13.0)
                     tw, th = blf.dimensions(0, text)
+                    lw = blf.dimensions(0, cap)[0]
+                    # Channel word on top, % readout beneath it.
+                    blf.position(0, cx - lw * 0.5,
+                                 min(ys) - th - 10.0, 0)
+                    blf.color(0, 1.0, 1.0, 1.0, 0.75)
+                    blf.draw(0, cap)
                     blf.position(0, cx - tw * 0.5,
-                                 min(ys) - th - 14.0, 0)
+                                 min(ys) - th * 2 - 14.0, 0)
                     blf.color(0, 1.0, 1.0, 1.0, 1.0)
                     blf.draw(0, text)
-                    if lidx == -1 and not _refboard_group:
-                        # Board-wide drag: caption the readout so it isn't
-                        # a bare floating number.
-                        blf.size(0, 13.0)
-                        cap = "Global " + attr.capitalize()
-                        lw = blf.dimensions(0, cap)[0]
-                        blf.position(0, cx - lw * 0.5,
-                                     min(ys) - 10.0, 0)
-                        blf.color(0, 1.0, 1.0, 1.0, 0.75)
-                        blf.draw(0, cap)
         except Exception:
             pass
 
