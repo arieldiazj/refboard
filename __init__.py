@@ -407,6 +407,15 @@ _refboard_ctx = {}
 # scene can't be touched. Alt+` enters it; ` or Alt+` leaves it, as does Esc.
 _refboard_canvas_on = False
 
+# Board-local undo, kept fully separate from Blender's memfile queue:
+# Refboard edits push snapshots of board state onto `past`, and Ctrl+Z /
+# Ctrl+Shift+Z inside edit mode step through them - so Blender's undo
+# never sees a Refboard step and Refboard undo only exists in edit mode.
+# `prev` is the last committed resting state, seeded when edit mode opens
+# or the board changes; each undo_push stores the gesture's PRE state
+# (every action's pre-state is the previous action's post-state).
+_refboard_undo = {"scene": None, "prev": None, "past": [], "future": []}
+
 # SpaceView3D objects whose UI region (N-panel) we collapsed when edit mode
 # was entered. Only spaces that had it visible are listed, so exit restores
 # exactly what it took and leaves previously-hidden ones alone.
@@ -1015,6 +1024,7 @@ def _refboard_switch_mode(scene, alt):
         scene.refboard_all_hidden = False
         _refboard_canvas_on = True
         _refboard_npanel_hide()
+        _refboard_undo_seed(scene)
         _refboard_help_ts = time.time()
         _refboard_mode_label = "Refboard Edit"
     else:
@@ -2535,6 +2545,7 @@ _REFBOARD_HELP_LINES = (
     ("Menu", "RMB options"),
     ("Opacity", "CTRL+RMB drag"),
     ("Copy/Paste", "CTRL+C or CTRL+V"),
+    ("Undo/Redo", "CTRL+Z or CTRL+SHIFT+Z"),
     ("Pan", "MMB or ALT+MMB drag"),
     ("Zoom", "Wheel or ALT+RMB drag"),
 )
@@ -2614,6 +2625,7 @@ def _refboard_finish(p):
         img.name = "Refboard"
     if p["mode"] == 'SCREEN':
         scene = st.get("scene") or bpy.context.scene
+        _refboard_undo_seed(scene)
         item = scene.refboard_items.add()
         item.image = img
         taken = {it.name for it in scene.refboard_items if it != item}
@@ -3516,13 +3528,116 @@ def _refboard_yield_end(scene, region, cancel=False):
     _refboard_yield = None
 
 
+def _refboard_board_state(scene):
+    """Serializable snapshot of the board for the local undo stacks: every
+    item's transform, crop quad, flags and its image (recorded by name AND
+    filepath so a GC'd datablock can be reloaded), plus selection/group."""
+    items = []
+    for it in scene.refboard_items:
+        img = it.image
+        items.append((
+            it.name,
+            img.name if img is not None else "",
+            (img.filepath_raw or "") if img is not None else "",
+            tuple(it.pos), tuple(it.scale), it.rotation,
+            tuple(it.crop), tuple(it.crop_pts),
+            it.opacity, it.visible, it.locked,
+            it.flip_x, it.flip_y, tuple(it.home_scale),
+        ))
+    return (tuple(items), scene.refboard_selected, tuple(_refboard_group))
+
+
+def _refboard_apply_board_state(scene, st):
+    """Restore a snapshot taken by _refboard_board_state. `crop` is written
+    before `crop_pts` because the crop setter re-syncs the quad."""
+    items, sel, grp = st
+    coll = scene.refboard_items
+    coll.clear()
+    for (name, iname, path, pos, scale, rot, crop, pts, op, vis,
+         locked, fx, fy, home) in items:
+        it = coll.add()
+        img = bpy.data.images.get(iname) if iname else None
+        if img is None and path:
+            try:
+                img = bpy.data.images.load(path, check_existing=True)
+            except Exception:
+                img = None
+        it.image = img
+        if name:
+            it.name = name
+        it.pos = pos
+        it.scale = scale
+        it.rotation = rot
+        it.crop = crop
+        it.crop_pts = pts
+        it.opacity = op
+        it.visible = vis
+        it.locked = locked
+        it.flip_x = fx
+        it.flip_y = fy
+        it.home_scale = home
+    scene.refboard_selected = sel if sel < len(coll) else -1
+    _refboard_group[:] = [i for i in grp if i < len(coll)]
+
+
+def _refboard_undo_seed(scene):
+    """Set the resting-state baseline the next push will store. Called when
+    edit mode opens, when a file loads, and lazily before one-shot ops that
+    can run outside edit mode."""
+    u = _refboard_undo
+    if u["scene"] != scene:
+        u["scene"] = scene
+        u["past"].clear()
+        u["future"].clear()
+        u["prev"] = None
+    if u["prev"] is None:
+        u["prev"] = _refboard_board_state(scene)
+
+
+def _refboard_undo_reset():
+    """Drop all recorded board history (file load / addon reload)."""
+    u = _refboard_undo
+    u["scene"] = None
+    u["prev"] = None
+    u["past"].clear()
+    u["future"].clear()
+
+
 def _refboard_undo_push(message):
-    """Commit a memfile undo step for a Refboard edit. Live drags mutate props
-    directly for speed; pushing on release/change makes the edit undoable."""
-    try:
-        bpy.ops.ed.undo_push(message=message)
-    except Exception:
-        pass
+    """Record a completed Refboard edit in the board-local undo stack.
+    Live drags mutate props directly for speed; the push stores the
+    gesture's PRE state (kept in `prev`) and clears the redo tail. Kept
+    out of Blender's memfile queue so Ctrl+Z in edit mode only steps
+    through board edits."""
+    u = _refboard_undo
+    scene = bpy.context.scene
+    _refboard_undo_seed(scene)
+    u["past"].append(u["prev"])
+    if len(u["past"]) > 64:
+        u["past"].pop(0)
+    u["prev"] = _refboard_board_state(scene)
+    u["future"].clear()
+
+
+def _refboard_undo_step(scene, redo=False):
+    """Step the board-local stacks: undo restores the newest stored
+    pre-state, redo reapplies the newest undone state. Returns False when
+    the chosen stack is empty."""
+    u = _refboard_undo
+    _refboard_undo_seed(scene)
+    if redo:
+        if not u["future"]:
+            return False
+        u["past"].append(_refboard_board_state(scene))
+        st = u["future"].pop()
+    else:
+        if not u["past"]:
+            return False
+        u["future"].append(_refboard_board_state(scene))
+        st = u["past"].pop()
+    _refboard_apply_board_state(scene, st)
+    u["prev"] = st
+    return True
 
 
 def _refboard_delete_selected(scene):
@@ -4156,6 +4271,20 @@ class REFBOARD_OT_interact(bpy.types.Operator):
             area.tag_redraw()
             return {'RUNNING_MODAL'}
 
+        if event.type in {'Z', 'Y'} and event.value == 'PRESS' and \
+                event.ctrl and not event.alt:
+            # Board-local undo/redo - the stacks only exist for Refboard
+            # edits, and only edit mode routes the key here. Outside edit
+            # mode the binding isn't ours and Blender's undo runs.
+            if not in_view or not _refboard_canvas_on:
+                return {'PASS_THROUGH'}
+            if _refboard_drag is None and _refboard_marquee is None and \
+                    _refboard_cropmarq is None:
+                redo = event.shift or event.type == 'Y'
+                _refboard_undo_step(scene, redo=redo)
+                area.tag_redraw()
+            return {'RUNNING_MODAL'}
+
         if event.type == 'H' and event.value == 'PRESS':
             if not in_view or not _refboard_canvas_on:
                 return {'PASS_THROUGH'}
@@ -4590,15 +4719,17 @@ class REFBOARD_OT_toggle_all(bpy.types.Operator):
 class REFBOARD_OT_clear(bpy.types.Operator):
     bl_idname = "refboard.clear"
     bl_label = "Clear Refs"
-    bl_options = {'INTERNAL', 'UNDO'}
+    bl_options = {'INTERNAL'}
 
     def execute(self, context):
         scene = context.scene
+        _refboard_undo_seed(scene)
         dropped = [it.image for it in scene.refboard_items]
         scene.refboard_items.clear()
         scene.refboard_selected = -1
         _refboard_group.clear()
         _refboard_gc_images(dropped)
+        _refboard_undo_push("Refboard Clear")
         _refboard_redraw_views()
         return {'FINISHED'}
 
@@ -4729,6 +4860,7 @@ def _refboard_load_post(dummy):
     _refboard_group.clear()
     _refboard_pending.clear()
     _refboard_icon_cache.clear()
+    _refboard_undo_reset()
     _refboard_kick_boot_timer()
 
 

@@ -1799,6 +1799,47 @@ def main():
           len(bks) == 1 and bks[0].startswith("refboard_v"), str(bks))
 
     # ------------------------------------------------------------------
+    section("P12 board-local undo stack")
+    # Refboard edits go into our own past/future snapshot stacks, not
+    # Blender's memfile queue - undo/redo only steps through board edits.
+    ct._refboard_undo_reset()
+    ct._refboard_undo_seed(scene)
+    base_n = len(scene.refboard_items)
+    check("empty stacks refuse steps",
+          not ct._refboard_undo_step(scene) and
+          not ct._refboard_undo_step(scene, redo=True))
+    png_u = make_png(os.path.join(tmp, "p12.png"))
+    ct._refboard_finish({"dst": png_u, "mode": 'SCREEN',
+                        "state": {"pos": (0.5, 0.5), "scene": scene,
+                                  "rw": 800, "rh": 600}})
+    check("paste records an undo step",
+          len(ct._refboard_undo["past"]) == 1)
+    it = scene.refboard_items[-1]
+    it.pos = (0.8, 0.8)
+    it.rotation = 1.0
+    ct._refboard_undo_push("T")
+    check("undo restores pre-state",
+          ct._refboard_undo_step(scene) and
+          abs(it.pos[0] - 0.5) < 1e-6 and abs(it.rotation) < 1e-6,
+          str((tuple(it.pos), it.rotation)))
+    check("redo reapplies",
+          ct._refboard_undo_step(scene, redo=True) and
+          abs(it.pos[0] - 0.8) < 1e-6 and abs(it.rotation - 1.0) < 1e-6)
+    check("undo walks back through each state",
+          ct._refboard_undo_step(scene) and
+          len(scene.refboard_items) == base_n + 1 and
+          abs(it.pos[0] - 0.5) < 1e-6)
+    check("second undo removes the pasted item",
+          ct._refboard_undo_step(scene) and
+          len(scene.refboard_items) == base_n)
+    check("undo past the baseline refuses",
+          not ct._refboard_undo_step(scene))
+    check("redo rebuilds the item + image",
+          ct._refboard_undo_step(scene, redo=True) and
+          len(scene.refboard_items) == base_n + 1 and
+          scene.refboard_items[-1].image is not None)
+
+    # ------------------------------------------------------------------
     print(f"\n=== RESULT: {PASS_COUNT} passed, {FAIL_COUNT} failed ===",
           flush=True)
     return 1 if FAIL_COUNT else 0
