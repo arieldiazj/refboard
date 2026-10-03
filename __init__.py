@@ -4282,8 +4282,8 @@ class REFBOARD_MT_ctx(bpy.types.Menu):
         col = self.layout.column()
         col.menu("REFBOARD_MT_arrange")
         col.separator()
-        col.operator("refboard.reset", text="Reset Image")
-        col.operator("refboard.reset_crop", text="Reset Cropping")
+        col.operator("refboard.reset", text="Reset (Full)")
+        col.operator("refboard.reset_crop", text="Reset (Cropping Only)")
 
 
 def _refboard_reset_item(scene, idx):
@@ -4330,7 +4330,7 @@ class REFBOARD_OT_reset(bpy.types.Operator):
     flips, cropping and opacity return to neutral. Size and position
     stay."""
     bl_idname = "refboard.reset"
-    bl_label = "Reset Image"
+    bl_label = "Reset (Full)"
     bl_options = {'INTERNAL'}
 
     def execute(self, context):
@@ -4350,7 +4350,7 @@ class REFBOARD_OT_reset_crop(bpy.types.Operator):
     """Restore the ref under the cursor (or the selected ref) to the
     full uncropped frame. Transform and opacity are untouched."""
     bl_idname = "refboard.reset_crop"
-    bl_label = "Reset Cropping"
+    bl_label = "Reset (Cropping Only)"
     bl_options = {'INTERNAL'}
 
     def execute(self, context):
