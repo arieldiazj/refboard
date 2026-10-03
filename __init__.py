@@ -4601,20 +4601,15 @@ class REFBOARD_OT_interact(bpy.types.Operator):
             if event.ctrl and not event.shift and not event.alt:
                 if event.type == 'V':
                     # Same path as the Ctrl+V keymap item, driven from
-                    # here because canvas mode swallows keymap input. No
-                    # image on the clipboard -> consume the key so
-                    # Blender's object paste can't fire in edit mode.
-                    if _refboard_clipboard_has_image():
-                        try:
-                            bpy.ops.refboard.paste('INVOKE_DEFAULT')
-                        except Exception:
-                            pass
-                    else:
-                        try:
-                            context.window.status_text_set(
-                                "Refboard: no image on the clipboard")
-                        except Exception:
-                            pass
+                    # here because canvas mode swallows keymap input. The
+                    # operator's own gate reports "no image" (status-bar
+                    # toast) and cancels - the key stays consumed either
+                    # way, so Blender's object paste can't fire in edit
+                    # mode.
+                    try:
+                        bpy.ops.refboard.paste('INVOKE_DEFAULT')
+                    except Exception:
+                        pass
                 else:
                     _refboard_copy_selected(scene)
             return {'RUNNING_MODAL'}
