@@ -4,6 +4,7 @@ import math
 import os
 import platform
 import shutil
+import struct
 import subprocess
 import tempfile
 import time
@@ -52,15 +53,6 @@ def _refboard_pref(name, default):
 class RefboardPreferences(bpy.types.AddonPreferences):
     bl_idname = ADDON_NAME
 
-    fresh_seconds: bpy.props.FloatProperty(
-        name="Paste freshness window",
-        default=60.0,
-        min=0.0,
-        description="Seconds after copying an image during which Ctrl+V in the "
-                    "3D view pastes onto the Refboard. Outside this window "
-                    "Ctrl+V keeps its normal Blender behavior. 0 = always.",
-    )
-
     show_n_panel: bpy.props.BoolProperty(
         name="Show N Panel",
         default=False,
@@ -74,16 +66,16 @@ class RefboardPreferences(bpy.types.AddonPreferences):
         update=lambda self, context: _refboard_redraw_views())
 
     help_size: bpy.props.FloatProperty(
-        name="Help Text Size", default=13.0, min=6.0, max=36.0,
+        name="Help Text Size", default=16.0, min=6.0, max=36.0,
         update=lambda self, context: _refboard_help_size_update(self, context))
 
     veil_color: bpy.props.FloatVectorProperty(
         name="Veil Color", size=3, subtype='COLOR',
-        default=(0.102, 0.098, 0.094), min=0.0, max=1.0,
+        default=(0.286, 0.282, 0.353), min=0.0, max=1.0,
         update=lambda self, context: _refboard_veil_update(self, context))
 
     veil_alpha: bpy.props.FloatProperty(
-        name="Veil Opacity", default=0.85, min=0.0, max=1.0,
+        name="Veil Opacity", default=0.7, min=0.0, max=1.0,
         update=lambda self, context: _refboard_veil_update(self, context))
 
     def draw(self, context):
@@ -96,7 +88,6 @@ class RefboardPreferences(bpy.types.AddonPreferences):
         row = col.row(align=True)
         row.prop(self, "veil_color", text="Veil")
         row.prop(self, "veil_alpha", text="", slider=True)
-        col.prop(self, "fresh_seconds")
 
 
 # --- image repository ---------------------------------------------------------
@@ -476,11 +467,6 @@ _refboard_modal_running = False
 # the mouse actually was.
 _refboard_menu_state = {}
 
-# Windows clipboard sequence number, polled by _refboard_clipboard_timer so a
-# Ctrl+V on stale clipboard contents falls through to Blender's normal paste.
-_refboard_clip_seq = None
-_refboard_clip_seq_ts = 0.0
-
 _refboard_keymaps = []
 
 _REFBOARD_HANDLE_R = 5.0      # drawn edge-dot radius
@@ -589,44 +575,35 @@ class RefboardItem(bpy.types.PropertyGroup):
 
 # --- clipboard plumbing (ported from ad_quick_paste) -------------------------
 
-def _refboard_clipboard_seq_win():
-    try:
-        return ctypes.windll.user32.GetClipboardSequenceNumber()
-    except Exception:
-        return None
+def _refboard_clipboard_has_image():
+    """True when the OS clipboard can currently serve an image.
 
-
-def _refboard_clipboard_timer():
-    global _refboard_clip_seq, _refboard_clip_seq_ts
-    if platform.system() != "Windows":
-        return None
-    seq = _refboard_clipboard_seq_win()
-    if seq is not None:
-        if _refboard_clip_seq is None:
-            _refboard_clip_seq = seq
-        elif seq != _refboard_clip_seq:
-            _refboard_clip_seq = seq
-            _refboard_clip_seq_ts = time.time()
-    return 0.5
-
-
-def _refboard_fresh_seconds(context):
-    try:
-        prefs = _get_prefs(context)
-        v = float(getattr(prefs, "fresh_seconds", 60.0))
-        return max(0.0, v)
-    except Exception:
-        return 60.0
-
-
-def _refboard_clipboard_fresh(context):
-    if platform.system() != "Windows":
+    Replaces the old sequence-number freshness gate: what gates Ctrl+V is
+    *content*, not age - an image copied before Blender even started is
+    just as pastable. A clipboard holding anything else (text, files,
+    Blender-internal copies) returns False so the event falls through to
+    Blender's own paste.
+    """
+    if platform.system() != "Windows" or _refboard_u32 is None:
         return True
-    fresh = _refboard_fresh_seconds(context)
-    if fresh <= 0.0:
-        return True
-    return _refboard_clip_seq_ts > 0.0 and \
-        (time.time() - _refboard_clip_seq_ts) <= fresh
+    for _ in range(10):
+        if _refboard_u32.OpenClipboard(None):
+            break
+        time.sleep(0.01)
+    else:
+        return False
+    try:
+        for name in ("PNG", "image/png"):
+            fmt = _refboard_u32.RegisterClipboardFormatW(name)
+            if fmt and _refboard_u32.IsClipboardFormatAvailable(fmt):
+                return True
+        # CF_DIBV5, CF_DIB, CF_BITMAP - bitmaps synthesize to DIB on read.
+        for fmt in (17, 8, 2):
+            if _refboard_u32.IsClipboardFormatAvailable(fmt):
+                return True
+        return False
+    finally:
+        _refboard_u32.CloseClipboard()
 
 
 def _refboard_download_url(url):
@@ -649,6 +626,96 @@ def _refboard_download_url(url):
     with open(dst, "wb") as f:
         f.write(data)
     return dst
+
+
+_refboard_u32 = None
+_refboard_k32 = None
+if platform.system() == "Windows":
+    try:
+        _refboard_u32 = ctypes.windll.user32
+        _refboard_k32 = ctypes.windll.kernel32
+        # Handles/pointers must be declared or ctypes truncates them to 32
+        # bits on Win64 and the reads come back garbage.
+        _refboard_u32.GetClipboardData.restype = ctypes.c_void_p
+        _refboard_u32.RegisterClipboardFormatW.argtypes = [ctypes.c_wchar_p]
+        _refboard_k32.GlobalLock.argtypes = [ctypes.c_void_p]
+        _refboard_k32.GlobalLock.restype = ctypes.c_void_p
+        _refboard_k32.GlobalUnlock.argtypes = [ctypes.c_void_p]
+        _refboard_k32.GlobalSize.argtypes = [ctypes.c_void_p]
+        _refboard_k32.GlobalSize.restype = ctypes.c_size_t
+    except Exception:
+        _refboard_u32 = _refboard_k32 = None
+
+
+def _refboard_dib_to_bmp(raw):
+    """Wrap raw DIB bytes (BITMAPINFOHEADER + palette + pixels) in a BMP file
+    header so Blender can load the clipboard image directly."""
+    if len(raw) < 20:
+        return None
+    hdr = struct.unpack_from("<I", raw, 0)[0]
+    bpp = struct.unpack_from("<H", raw, 14)[0]
+    comp = struct.unpack_from("<I", raw, 16)[0]
+    used = struct.unpack_from("<I", raw, 32)[0] if len(raw) >= 36 else 0
+    ncolors = used or (1 << bpp if bpp <= 8 else 0)
+    # On a 40-byte BITMAPINFOHEADER, BI_BITFIELDS masks live right after the
+    # header; in BITMAPV5HEADER they are embedded already.
+    masks = 12 if hdr == 40 and comp == 3 else 0
+    off = 14 + hdr + ncolors * 4 + masks
+    return struct.pack("<2sIHHI", b"BM", 14 + len(raw), 0, 0, off) + raw
+
+
+def _refboard_clip_read_fmt(fmt):
+    """Copy the clipboard payload for `fmt` out of its global handle."""
+    h = _refboard_u32.GetClipboardData(fmt)
+    if not h:
+        return None
+    size = _refboard_k32.GlobalSize(h)
+    ptr = _refboard_k32.GlobalLock(h)
+    if not ptr:
+        return None
+    try:
+        return ctypes.string_at(ptr, size)
+    finally:
+        _refboard_k32.GlobalUnlock(h)
+
+
+def _refboard_clipboard_image_win(dst_base):
+    """Read the OS clipboard image in-process: no subprocess, ~ms not ~s.
+
+    Prefers the registered PNG clipboard format (browsers/screenshot tools
+    put real PNG bytes up, alpha intact), then CF_DIBV5/CF_DIB wrapped into
+    a BMP file. Returns the written file's path, or None when the clipboard
+    holds no usable image - the caller falls back to PowerShell for that.
+    """
+    if _refboard_u32 is None:
+        return None
+    for _ in range(10):
+        if _refboard_u32.OpenClipboard(None):
+            break
+        time.sleep(0.01)
+    else:
+        return None
+    try:
+        for name in ("PNG", "image/png"):
+            fmt = _refboard_u32.RegisterClipboardFormatW(name)
+            raw = _refboard_clip_read_fmt(fmt) if fmt else None
+            if raw:
+                out = os.path.splitext(dst_base)[0] + ".png"
+                with open(out, "wb") as f:
+                    f.write(raw)
+                return out
+        for fmt in (17, 8):          # CF_DIBV5, CF_DIB
+            raw = _refboard_clip_read_fmt(fmt)
+            if raw:
+                bmp = _refboard_dib_to_bmp(raw)
+                if bmp:
+                    out = os.path.splitext(dst_base)[0] + ".bmp"
+                    with open(out, "wb") as f:
+                        f.write(bmp)
+                    return out
+    finally:
+        _refboard_u32.CloseClipboard()
+    return None
 
 
 def _refboard_paste_proc(dst_path):
@@ -696,7 +763,6 @@ def _refboard_copy_proc(src_path):
 def _refboard_copy_selected(scene):
     """Ctrl+C in canvas mode: the selected ref's image goes to the OS
     clipboard, so it can paste into other apps - or back onto the board."""
-    global _refboard_clip_seq_ts
     idx = scene.refboard_selected
     if not (0 <= idx < len(scene.refboard_items)):
         return False
@@ -716,9 +782,6 @@ def _refboard_copy_selected(scene):
         _refboard_copy_proc(path)
     except Exception:
         return False
-    # Our own write counts as fresh, so Ctrl+V right after a copy works
-    # even before the clipboard timer observes the seq bump.
-    _refboard_clip_seq_ts = time.time()
     return True
 
 
@@ -1821,6 +1884,22 @@ def _refboard_corner_arc(cx, cy, rot, rgba):
         _refboard_draw_smooth('TRI_STRIP', pts, cols)
 
 
+def _refboard_draw_wanted(scene, items):
+    """Whether the draw callback has anything to do this frame.
+
+    An empty board is not automatically 'nothing': entering edit mode must
+    show the veil even before the first paste, so the raw canvas flag alone
+    keeps us drawing."""
+    if items:
+        return True
+    if _refboard_pending:
+        return True
+    if _refboard_mode_label and \
+            (time.time() - _refboard_mode_ts) < 1.5:
+        return True
+    return _refboard_canvas_on
+
+
 def _draw_refboard():
     context = bpy.context
     scene = getattr(context, "scene", None)
@@ -1832,12 +1911,7 @@ def _draw_refboard():
     if getattr(scene, "refboard_all_hidden", False):
         items = None
     show_help = _refboard_pref("show_help", True)
-    # Keep the handler alive while a mode label is flashing even when the
-    # board is hidden, so "Refboard Off" is actually seen.
-    mode_flash = bool(_refboard_mode_label) and \
-        (time.time() - _refboard_mode_ts) < 1.5
-    if (items is None or len(items) == 0) and not _refboard_pending and \
-            not mode_flash:
+    if not _refboard_draw_wanted(scene, items):
         return
     tex_shader, flat = _refboard_shaders()
     if flat is None:
@@ -1860,7 +1934,9 @@ def _draw_refboard():
         # Canvas mode shows the veil at full strength. While the veil prefs
         # are being dragged the timestamp refreshes and it stays at full
         # alpha for a live preview, fading out 1.5s after the last change.
-        veil_fade = 1.0 if _refboard_canvas_mode(scene) else max(
+        # Raw flag, not canvas_mode(): the veil is the edit-mode indicator
+        # and must show even with zero refs pasted.
+        veil_fade = 1.0 if _refboard_canvas_on else max(
             0.0, 1.0 - (time.time() - _refboard_veil_ts) / 1.5)
         if veil_fade > 0.0:
             dw, dh = float(region.width), float(region.height)
@@ -2170,33 +2246,25 @@ def _draw_refboard():
             except Exception:
                 pass
 
-    # Help overlay, bottom-right of the viewport - only while a ref is
-    # selected, then fades out over 1.5s. Function names on the left, the
-    # key/drag combo in an indented right column.
-    if show_help and blf is not None and region.type == 'WINDOW':
-        global _refboard_help_ts
-        n = len(items) if items is not None else 0
-        active = _refboard_canvas_on and (
-            (0 <= sel < n) or drag is not None or bool(_refboard_group))
-        if active:
-            _refboard_help_ts = time.time()
-        fade = max(0.0, 1.0 - (time.time() - _refboard_help_ts) / 1.5)
-        if fade > 0.0:
-            try:
-                _refboard_draw_help(
-                    region, fade,
-                    _refboard_pref("help_size", 13.0))
-            except Exception:
-                pass
-            if fade < 1.0:
-                try:
-                    region.tag_redraw()  # keep the fade animating
-                except Exception:
-                    pass
+    # Help overlay, bottom-right: persistent for the whole edit-mode
+    # session; only H (the Show Help pref) toggles it.
+    if show_help and blf is not None and region.type == 'WINDOW' and \
+            _refboard_canvas_on:
+        try:
+            _refboard_draw_help(
+                region, 1.0, _refboard_pref("help_size", 16.0))
+        except Exception:
+            pass
 
-    # Mode flash: the glyph for the mode just selected, bottom-center, fading
-    # over 1.5s. Falls back to the text label when no icon can be drawn.
-    if region.type == 'WINDOW' and _refboard_mode_flash_visible(scene):
+    # Edit mode gets a persistent caption, not a timed flash - it is the
+    # mode indicator for as long as the mode is on. Exit/hide still flash
+    # their glyph for 1.5s. Falls back to text when no icon can be drawn.
+    if _refboard_canvas_on and region.type == 'WINDOW':
+        try:
+            _refboard_draw_edit_caption(region)
+        except Exception:
+            pass
+    elif region.type == 'WINDOW' and _refboard_mode_flash_visible(scene):
         mfade = max(0.0, 1.0 - (time.time() - _refboard_mode_ts) / 1.5)
         if mfade > 0.0:
             drew = _refboard_draw_mode_icons(
@@ -2235,7 +2303,11 @@ def _refboard_mode_flash_visible(scene):
     """
     if not _refboard_mode_label:
         return False
-    return bool(len(getattr(scene, "refboard_items", None) or []))
+    if len(getattr(scene, "refboard_items", None) or []):
+        return True
+    # Edit mode announces itself even before the first paste - the veil is
+    # up and the label is how the paste-into-edit-mode flow is discovered.
+    return _refboard_mode_label == "Refboard Edit"
 
 
 _refboard_icon_cache = {}
@@ -2244,7 +2316,6 @@ _refboard_icon_cache = {}
 # "Refboard Exit" means the board is visible but not editable, which is the
 # state both leaving edit mode and un-hiding the board land in.
 _REFBOARD_MODE_ICONS = (
-    ("Refboard Edit", "frame.png"),
     ("Refboard Exit", "visible.png"),
     ("Refboard Off", "invisible.png"),
 )
@@ -2355,6 +2426,32 @@ def _refboard_icon(fname, target_w=None):
     return entry
 
 
+def _refboard_draw_edit_caption(region):
+    """Persistent edit-mode caption: 'Refboard (Edit Mode)' bottom-center,
+    shown for as long as the mode is on - not a timed flash."""
+    if blf is None:
+        return
+    try:
+        text = "Refboard (Edit Mode)"
+        size = 18.0
+        blf.size(0, size)
+        tw, th = blf.dimensions(0, text)
+        try:
+            blf.enable(0, blf.SHADOW)
+            blf.shadow(0, 3, 0.0, 0.0, 0.0, 0.8)
+        except Exception:
+            pass
+        blf.color(0, 0.95, 0.95, 0.95, 0.9)
+        blf.position(0, region.width * 0.5 - tw * 0.5, 34.0, 0)
+        blf.draw(0, text)
+        blf.disable(0, blf.SHADOW)
+    except Exception:
+        try:
+            blf.disable(0, blf.SHADOW)
+        except Exception:
+            pass
+
+
 def _refboard_draw_mode_icons(region, tex_shader, label, alpha):
     """Flash the glyph for the mode that was just selected, bottom-center.
     Only the active mode is drawn - the other two would just be noise.
@@ -2412,37 +2509,38 @@ def _refboard_veil_update(self, context):
 
 
 def _refboard_help_size_update(self, context):
-    # Refresh the fade window on every tick so the help stays at full
-    # opacity while the slider is being dragged (live size preview),
-    # then fades out 1.5s after the last change.
+    # Redraw so a size change shows immediately in the persistent help.
     global _refboard_help_ts
     _refboard_help_ts = time.time()
     _refboard_redraw_views()
 
 
+_REFBOARD_HELP_HEADER = "Refboard Help (H)"
+
+_REFBOARD_HELP_LINES = (
+    ("Move", "LMB-drag image"),
+    ("Rotate", "Drag arc past a corner"),
+    ("Scale", "Drag frame handle or CTRL+ALT drag"),
+    ("Crop", "CTRL+drag a rect"),
+    ("Flip", "CTRL+SHIFT quick drag"),
+    ("Group", "LMB-drag empty space"),
+    ("Depth", "[ back or ] front"),
+    ("Mode", "` board or ALT+` edit"),
+    ("Menu", "RMB options"),
+    ("Opacity", "CTRL+RMB drag"),
+    ("Copy/Paste", "CTRL+C or CTRL+V"),
+    ("Pan", "MMB or ALT+MMB drag"),
+    ("Zoom", "Wheel or ALT+RMB drag"),
+)
+
+
 def _refboard_draw_help(region, fade, size=11.0):
     """Bottom-right help block. Function name left, key/drag combo indented
     in a right column. fade (0..1) scales all alphas for the ease-out."""
-    lines = [
-        ("Move", "Click-Drag over image"),
-        ("Rotate", "Move cursor outside the corners, click-drag when "
-                   "rotator markers show"),
-        ("Scale", "Drag handle points for direction, or CTRL-ALT Drag "
-                  "over the image"),
-        ("Crop", "Hold CTRL and drag a rect over the image"),
-        ("Flip", "CTRL+SHIFT quick drag horizontally or vertically"),
-        ("Group", "Click-Drag on empty space"),
-        ("Depth", "[ to back / ] to front"),
-        ("Mode", "` shows/hides the board, ALT+` toggles edit mode"),
-        ("Menu", "Right-Click for board options"),
-        ("Opacity", "CTRL+RMB Drag"),
-        ("Copy/Paste", "CTRL+C copies selected, CTRL+V pastes"),
-        ("Pan Board", "MMB or ALT+MMB Drag"),
-        ("Zoom Board", "Wheel or ALT+RMB Drag"),
-    ]
+    lines = _REFBOARD_HELP_LINES
     size = max(4.0, float(size))
     blf.size(0, size)
-    header = "Refboard Help"
+    header = _REFBOARD_HELP_HEADER
     col_w = max(blf.dimensions(0, k)[0] for k, _ in lines) + size * 1.5
     maxw = max(col_w + max(blf.dimensions(0, v)[0] for _, v in lines),
                blf.dimensions(0, header)[0])
@@ -3988,17 +4086,30 @@ class REFBOARD_OT_interact(bpy.types.Operator):
             area.tag_redraw()
             return {'RUNNING_MODAL'}
 
+        if event.type == 'H' and event.value == 'PRESS':
+            if not in_view or not _refboard_canvas_on:
+                return {'PASS_THROUGH'}
+            try:
+                prefs = _get_prefs(context)
+                prefs.show_help = not prefs.show_help
+            except Exception:
+                pass
+            return {'RUNNING_MODAL'}
+
         if event.type in {'C', 'V'} and event.value == 'PRESS':
             if not in_view or not _refboard_canvas_mode(scene):
                 return {'PASS_THROUGH'}
             if event.ctrl and not event.shift and not event.alt:
                 if event.type == 'V':
                     # Same path as the Ctrl+V keymap item, driven from
-                    # here because canvas mode swallows keymap input.
-                    try:
-                        bpy.ops.refboard.paste('INVOKE_DEFAULT')
-                    except Exception:
-                        pass
+                    # here because canvas mode swallows keymap input. No
+                    # image on the clipboard -> consume the key so
+                    # Blender's object paste can't fire in edit mode.
+                    if _refboard_clipboard_has_image():
+                        try:
+                            bpy.ops.refboard.paste('INVOKE_DEFAULT')
+                        except Exception:
+                            pass
                 else:
                     _refboard_copy_selected(scene)
             return {'RUNNING_MODAL'}
@@ -4214,15 +4325,23 @@ class REFBOARD_OT_arrange_auto(bpy.types.Operator):
 
 
 class REFBOARD_OT_paste(bpy.types.Operator):
-    """Ctrl+V entry point: gates on clipboard freshness, stashes the view state
-    under the mouse, and starts a screen-space import immediately."""
+    """Ctrl+V entry point: gates on edit mode and an image actually being
+    on the clipboard, stashes the view state under the mouse, and starts a
+    screen-space import immediately."""
     bl_idname = "refboard.paste"
     bl_label = "Refboard"
     bl_options = {'INTERNAL'}
 
     def invoke(self, context, event):
-        if not _refboard_clipboard_fresh(context):
+        # Refboard must never hijack a paste outside edit mode:
+        # PASS_THROUGH lets the keymap keep matching so Blender's own
+        # paste (objects, drivers, ...) runs instead.
+        if not _refboard_canvas_on:
             return {'PASS_THROUGH'}
+        if not _refboard_clipboard_has_image():
+            # Inside edit mode the key belongs to Refboard: no image means
+            # "nothing to paste", not "defer to Blender's object paste".
+            return {'CANCELLED'}
         pos = (0.5, 0.5)
         rw = rh = 0
         cw = ch = 0
@@ -4280,6 +4399,22 @@ class REFBOARD_OT_do_paste(bpy.types.Operator):
         dst = os.path.join(
             tempfile.gettempdir(),
             "refboard_%s.png" % uuid.uuid4().hex)
+        # In-process clipboard read lands in ~ms, so the ref appears
+        # immediately with no progress bar at all.
+        if platform.system() == "Windows":
+            try:
+                hit = _refboard_clipboard_image_win(dst)
+            except Exception:
+                hit = None
+            if hit:
+                try:
+                    _refboard_finish({"dst": hit, "mode": self.mode,
+                                      "state": st})
+                except Exception as e:
+                    self.report({'ERROR'}, "Image load failed: %s" % e)
+                    return {'CANCELLED'}
+                _refboard_redraw_views()
+                return {'FINISHED'}
         try:
             proc = _refboard_paste_proc(dst)
         except Exception as e:
@@ -4611,12 +4746,6 @@ def register():
     bpy.app.handlers.load_post.append(_refboard_load_post)
     bpy.app.handlers.save_pre.append(_refboard_save_pre)
 
-    if platform.system() == "Windows":
-        try:
-            bpy.app.timers.register(
-                _refboard_clipboard_timer, persistent=True)
-        except Exception:
-            pass
     _refboard_kick_boot_timer()
 
     global _REFBOARD_HANDLER
@@ -4672,7 +4801,7 @@ def unregister():
             pass
     _refboard_keymaps.clear()
 
-    for timer in (_refboard_clipboard_timer, _refboard_poll_timer,
+    for timer in (_refboard_poll_timer,
                   _refboard_boot_timer, _refboard_yield_timer):
         try:
             bpy.app.timers.unregister(timer)

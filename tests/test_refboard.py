@@ -11,7 +11,7 @@ Covers:
   * drag math (move, corner scale, edge scale, rotate, crop, center scale)
   * persistence through save + reload
   * selection delete and clear
-  * clipboard freshness gate
+  * clipboard image gate
 
 GPU drawing and modal event flow are not testable in -b (no GPU context).
 Prints PASS/FAIL per check and exits non-zero on any failure.
@@ -1310,6 +1310,9 @@ def main():
     dirty = sorted(i.name for i in bpy.data.images if i.is_dirty)
     check("no image is left modified", not dirty, str(dirty))
     ct._refboard_icon_cache.clear()
+    check("edit mode flashes text, not a glyph",
+          next((f for l, f in ct._REFBOARD_MODE_ICONS
+                if l == "Refboard Edit"), None) is None)
 
     # ------------------------------------------------------------------
     section("P6e glyph downscale is area-averaged")
@@ -1357,6 +1360,9 @@ def main():
     ct._refboard_mode_label = "Refboard Off"
     check("empty board flashes nothing",
           not ct._refboard_mode_flash_visible(scene))
+    ct._refboard_mode_label = "Refboard Edit"
+    check("empty board still flashes edit mode",
+          ct._refboard_mode_flash_visible(scene))
 
     png_flash = make_png(os.path.join(tmp, "flash.png"))
     ct._refboard_finish({"dst": png_flash, "mode": 'SCREEN',
@@ -1374,23 +1380,73 @@ def main():
     check("no label flashes nothing",
           not ct._refboard_mode_flash_visible(scene))
     ct._refboard_mode_label = saved_label
+
+    # The draw gate: an empty board draws nothing... unless edit mode is
+    # on, where the veil must show even before the first paste.
+    saved_canvas = ct._refboard_canvas_on
+    saved_pending = ct._refboard_pending
+    try:
+        ct._refboard_mode_label = ""
+        ct._refboard_pending = []
+        ct._refboard_canvas_on = False
+        check("empty board wants no draw",
+              not ct._refboard_draw_wanted(scene, []))
+        ct._refboard_canvas_on = True
+        check("edit mode wants the veil when empty",
+              ct._refboard_draw_wanted(scene, []))
+    finally:
+        ct._refboard_canvas_on = saved_canvas
+        ct._refboard_pending = saved_pending
     bpy.ops.refboard.clear()
 
     # ------------------------------------------------------------------
-    section("P7 clipboard freshness gate")
+    section("P6g in-process clipboard read")
+    # A real 8x8 32bpp DIB: BITMAPINFOHEADER + bottom-up BGRA pixels.
+    import struct as _st
+    w, h = 8, 8
+    dib = _st.pack("<IiiHHIIiiII", 40, w, h, 1, 32, 0, w * h * 4,
+                   0, 0, 0, 0) + b"\x40\x80\xC0\xFF" * (w * h)
+    bmp_bytes = ct._refboard_dib_to_bmp(dib)
+    check("dib wraps into a bmp", bmp_bytes is not None and
+          bmp_bytes[:2] == b"BM")
+    check("bmp file size in header",
+          _st.unpack_from("<I", bmp_bytes, 2)[0] == 14 + len(dib))
+    bmp_path = os.path.join(tmp, "dib_rt.bmp")
+    with open(bmp_path, "wb") as f:
+        f.write(bmp_bytes)
+    bmp_img = bpy.data.images.load(bmp_path)
+    check("blender loads the wrapped bmp",
+          tuple(bmp_img.size) == (8, 8), str(tuple(bmp_img.size)))
+    bpy.data.images.remove(bmp_img)
+
+    # ------------------------------------------------------------------
+    section("P7 clipboard image gate")
     if ct.platform.system() == "Windows":
-        ct._refboard_clip_seq_ts = 0.0
-        check("stale when never seen",
-              not ct._refboard_clipboard_fresh(ctx))
-        ct._refboard_clip_seq_ts = time.time()
-        check("fresh right after copy",
-              ct._refboard_clipboard_fresh(ctx))
-        ct._refboard_clip_seq_ts = time.time() - 3600.0
-        check("stale after window",
-              not ct._refboard_clipboard_fresh(ctx))
+        try:
+            import subprocess as _sp
+            flags = getattr(_sp, "CREATE_NO_WINDOW", 0)
+            _sp.run(["powershell", "-STA", "-NoProfile",
+                     "-NonInteractive", "-Command",
+                     "Set-Clipboard -Value 'refboard gate test'"],
+                    capture_output=True, timeout=15, creationflags=flags)
+            check("gate closed on text clipboard",
+                  not ct._refboard_clipboard_has_image())
+            src = make_png(os.path.join(tmp, "gate.png"))
+            _sp.run(
+                ["powershell", "-STA", "-NoProfile",
+                 "-NonInteractive", "-Command",
+                 "Add-Type -AssemblyName System.Windows.Forms;"
+                 "Add-Type -AssemblyName System.Drawing;"
+                 "[Windows.Forms.Clipboard]::SetImage("
+                 "[System.Drawing.Bitmap]::FromFile('%s'))" % src],
+                capture_output=True, timeout=15, creationflags=flags)
+            check("gate open on image clipboard",
+                  ct._refboard_clipboard_has_image())
+        except Exception as e:
+            print("  [SKIP] clipboard gate: %s" % e, flush=True)
     else:
-        check("non-windows always fresh",
-              ct._refboard_clipboard_fresh(ctx))
+        check("non-windows gate permissive",
+              ct._refboard_clipboard_has_image())
 
     # ------------------------------------------------------------------
     section("P8 real clipboard end-to-end (optional)")
@@ -1408,10 +1464,15 @@ def main():
             capture_output=True, timeout=15, creationflags=flags)
         if setr.returncode != 0:
             raise RuntimeError("clipboard set failed: %s" % setr.stderr)
-        dst = os.path.join(tmp, "clip_out.png")
-        proc = ct._refboard_paste_proc(dst)
-        proc.wait(timeout=15)
-        ct._refboard_finish({"dst": dst, "mode": 'SCREEN',
+        got = ct._refboard_clipboard_image_win(
+            os.path.join(tmp, "clip_out.png"))
+        if not got:
+            got = os.path.join(tmp, "clip_out.png")
+            proc = ct._refboard_paste_proc(got)
+            proc.wait(timeout=15)
+        check("clipboard e2e read landed a file",
+              bool(got) and os.path.isfile(got), str(got))
+        ct._refboard_finish({"dst": got, "mode": 'SCREEN',
                             "state": {"pos": (0.5, 0.5), "scene": scene,
                                       "rw": 800, "rh": 600}})
         check("clipboard e2e item", len(scene.refboard_items) == 1)
@@ -1426,9 +1487,17 @@ def main():
     prefs = ctx.preferences.addons["refboard"].preferences
     check("pref show_n_panel default off", not prefs.show_n_panel)
     check("pref show_help default on", prefs.show_help)
-    check("pref help_size default", abs(prefs.help_size - 13.0) < 1e-6)
+    check("pref help_size default", abs(prefs.help_size - 16.0) < 1e-6)
+    check("help header advertises H toggle",
+          ct._REFBOARD_HELP_HEADER == "Refboard Help (H)")
+    check("help lines stay compact",
+          all(len(v) <= 34 for _, v in ct._REFBOARD_HELP_LINES),
+          str([v for _, v in ct._REFBOARD_HELP_LINES if len(v) > 34]))
     check("pref veil_alpha default",
-          abs(prefs.veil_alpha - 0.85) < 1e-6)
+          abs(prefs.veil_alpha - 0.7) < 1e-6)
+    check("pref veil_color default",
+          all(abs(a - b) < 1e-3 for a, b in
+              zip(prefs.veil_color, (0.286, 0.282, 0.353))))
     check("pref read helper", ct._refboard_pref("show_help", False) is True)
     check("pref read fallback",
           ct._refboard_pref("no_such_prop", 42) == 42)
