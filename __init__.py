@@ -2920,6 +2920,12 @@ def _refboard_status(msg, duration=3.0):
         if ws is None:
             return
         ws.status_text_set(msg)
+        try:
+            for win in bpy.context.window_manager.windows:
+                for a in win.screen.areas:
+                    a.tag_redraw()
+        except Exception:
+            pass
         def _clear():
             try:
                 w = getattr(bpy.context, "workspace", None)
@@ -2931,6 +2937,17 @@ def _refboard_status(msg, duration=3.0):
         bpy.app.timers.register(_clear, first_interval=duration)
     except Exception:
         pass
+
+
+def _refboard_report_no_image():
+    """Zero-delay timer: run the paste op outside the modal event so its
+    report travels the normal dispatch path (reports raised by an op
+    invoked *inside* a modal handler aren't guaranteed a toast)."""
+    try:
+        bpy.ops.refboard.paste('INVOKE_DEFAULT')
+    except Exception as e:
+        print("Refboard paste failed:", e)
+    return None
 
 
 def _refboard_poll_timer():
@@ -4629,18 +4646,26 @@ class REFBOARD_OT_interact(bpy.types.Operator):
                 if event.type == 'V':
                     # Same path as the Ctrl+V keymap item, driven from
                     # here because canvas mode swallows keymap input. The
-                    # operator's own gate reports "no image" (status-bar
-                    # toast) and cancels - the key stays consumed either
-                    # way, so Blender's object paste can't fire in edit
-                    # mode. Nested-op reports don't always surface a
-                    # toast, so status_text_set covers the bar too.
-                    if not _refboard_clipboard_has_image():
+                    # key stays consumed either way, so Blender's object
+                    # paste can't fire in edit mode. With an image the op
+                    # runs nested (keeps the cursor position); without one
+                    # it's deferred to a timer so the report toast goes
+                    # through normal dispatch, with status_text_set as a
+                    # second native channel.
+                    if _refboard_clipboard_has_image():
+                        try:
+                            bpy.ops.refboard.paste('INVOKE_DEFAULT')
+                        except Exception:
+                            pass
+                    else:
                         _refboard_status(
                             "Refboard: no image on the clipboard")
-                    try:
-                        bpy.ops.refboard.paste('INVOKE_DEFAULT')
-                    except Exception:
-                        pass
+                        try:
+                            bpy.app.timers.register(
+                                _refboard_report_no_image,
+                                first_interval=0.0)
+                        except Exception:
+                            pass
                 else:
                     _refboard_copy_selected(scene)
             return {'RUNNING_MODAL'}
