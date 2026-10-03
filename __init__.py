@@ -4881,7 +4881,6 @@ class REFBOARD_OT_paste(bpy.types.Operator):
             # Inside edit mode the key belongs to Refboard: no image means
             # "nothing to paste", not "defer to Blender's object paste".
             self.report({'INFO'}, "Refboard: no image on the clipboard")
-            _refboard_status("Refboard: no image on the clipboard")
             return {'CANCELLED'}
         pos = (0.5, 0.5)
         rw = rh = 0
@@ -4946,7 +4945,6 @@ class REFBOARD_OT_do_paste(bpy.types.Operator):
                 _refboard_finish({"dst": fp, "mode": self.mode, "state": st})
             except Exception as e:
                 self.report({'WARNING'}, "Refboard: %s" % e)
-                _refboard_status("Refboard: %s" % e)
                 return {'CANCELLED'}
             _refboard_redraw_views()
             return {'FINISHED'}
@@ -4969,7 +4967,6 @@ class REFBOARD_OT_do_paste(bpy.types.Operator):
                                       "state": st})
                 except Exception as e:
                     self.report({'WARNING'}, "Refboard: %s" % e)
-                    _refboard_status("Refboard: %s" % e)
                     return {'CANCELLED'}
                 _refboard_redraw_views()
                 return {'FINISHED'}
