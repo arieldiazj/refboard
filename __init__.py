@@ -1458,6 +1458,132 @@ def _refboard_screen_to_uv(item, region, scene, mx, my):
             ly / max(1e-4, ih * item.scale[1]) + 0.5)
 
 
+def _refboard_point_in_poly(px, py, poly):
+    """Point inside a convex polygon, edge signs taken from the centroid."""
+    cx = sum(pt[0] for pt in poly) / len(poly)
+    cy = sum(pt[1] for pt in poly) / len(poly)
+    for i in range(len(poly)):
+        ax, ay = poly[i]
+        bx, by = poly[(i + 1) % len(poly)]
+        ex, ey = bx - ax, by - ay
+        el = math.hypot(ex, ey)
+        if el < 1e-12:
+            continue
+        side = ex * (cy - ay) - ey * (cx - ax)
+        if side == 0.0:
+            continue
+        # Cross products scale with |edge|^2 for big quads - normalize to
+        # a signed pixel distance so the tolerance is real (0.001 px).
+        val = (ex * (py - ay) - ey * (px - ax)) / el
+        if (1.0 if side > 0.0 else -1.0) * val < -0.001:
+            return False
+    return True
+
+
+def _refboard_rect_poly_overlap(xa, ya, xb, yb, poly):
+    """SAT overlap: axis-aligned rect vs a convex polygon (screen px)."""
+    rect = [(xa, ya), (xb, ya), (xb, yb), (xa, yb)]
+    for ax_ in (0, 1):
+        rlo, rhi = xa, xb
+        if ax_ == 1:
+            rlo, rhi = ya, yb
+        plo = min(pt[ax_] for pt in poly)
+        phi = max(pt[ax_] for pt in poly)
+        if rhi < plo or phi < rlo:
+            return False
+    for i in range(len(poly)):
+        ax, ay = poly[i]
+        bx, by = poly[(i + 1) % len(poly)]
+        nx, ny = ay - by, bx - ax
+        rp = [pt[0] * nx + pt[1] * ny for pt in rect]
+        pp = [pt[0] * nx + pt[1] * ny for pt in poly]
+        if max(rp) < min(pp) or max(pp) < min(rp):
+            return False
+    return True
+
+
+def _refboard_quad_axisaligned(quad):
+    """True when every edge of the screen quad is horizontal or vertical -
+    i.e. the visible crop is a plain rect (unrotated image, unsheared
+    crop)."""
+    for i in range(4):
+        ax, ay = quad[i]
+        bx, by = quad[(i + 1) % 4]
+        if abs(ax - bx) > 0.25 and abs(ay - by) > 0.25:
+            return False
+    return True
+
+
+def _refboard_marquee_clamp(m0, mx, my, quad):
+    """Scale the m0->cursor vector so the axis-aligned marquee anchored at
+    m0 never leaves the convex quad: the first rect corner to touch an edge
+    stops the drag. Every moving corner is linear in t, so the limit is a
+    closed-form solve per edge."""
+    dx, dy = mx - m0[0], my - m0[1]
+    if dx == 0.0 and dy == 0.0:
+        return m0
+    cx = sum(pq[0] for pq in quad) / 4.0
+    cy = sum(pq[1] for pq in quad) / 4.0
+    tmax = 1.0
+    for i in range(4):
+        ax, ay = quad[i]
+        bx, by = quad[(i + 1) % 4]
+        ex, ey = bx - ax, by - ay
+        sgn = ex * (cy - ay) - ey * (cx - ax)
+        if abs(sgn) < 1e-12:
+            continue
+        sgn = 1.0 if sgn > 0.0 else -1.0
+        a = (ex * (m0[1] - ay) - ey * (m0[0] - ax)) * sgn
+        if a < -1e-9:
+            return m0      # anchor outside this wall: no valid rect
+        for ox, oy in ((dx, 0.0), (0.0, dy), (dx, dy)):
+            f1 = (ex * oy - ey * ox) * sgn
+            if f1 < -1e-12:
+                tmax = min(tmax, a / -f1)
+    tmax = max(0.0, min(1.0, tmax))
+    return (m0[0] + dx * tmax, m0[1] + dy * tmax)
+
+
+def _refboard_cropmarq_update(scene, region, mx, my):
+    """Per-move marquee update. An inside-start marquee is clamped into the
+    item's crop quad; an outside-start marquee probes every visible ref -
+    overlapping a rotated (non-axis-aligned) crop flags the drag illegal so
+    the draw paints it red and the release discards it."""
+    cm = _refboard_cropmarq
+    if cm is None:
+        return
+    m0 = cm["m0"]
+    view = _refboard_view(scene, region)
+    items = scene.refboard_items
+    if cm.get("inside"):
+        cm["cur"] = (mx, my)
+        idx = cm.get("idx")
+        if idx is not None and 0 <= idx < len(items):
+            item = items[idx]
+            if item.image is not None:
+                quad = _refboard_crop_quad(item, region, item.image, view)
+                cm["cur"] = _refboard_marquee_clamp(m0, mx, my, quad)
+        return
+    cm["cur"] = (mx, my)
+    xa, xb = min(m0[0], mx), max(m0[0], mx)
+    ya, yb = min(m0[1], my), max(m0[1], my)
+    illegal = False
+    target = None
+    for i, item in enumerate(items):
+        img = item.image
+        if img is None or not item.visible or item.locked:
+            continue
+        quad = _refboard_crop_quad(item, region, img, view)
+        if not _refboard_rect_poly_overlap(xa, ya, xb, yb, quad):
+            continue
+        if not _refboard_quad_axisaligned(quad):
+            illegal = True
+        else:
+            target = i            # collection order = draw order: last wins
+    cm["illegal"] = illegal
+    cm["target"] = target
+
+
 def _refboard_apply_crop_rect(scene, region, idx, x0, y0, x1, y1):
     """Crop item `idx` to the axis-aligned screen rect drawn by the crop
     marquee. The screen rect maps to a (possibly rotated) rect in UV space;
@@ -2178,11 +2304,16 @@ def _draw_refboard():
                      (max(x0, x1), min(y0, y1)),
                      (max(x0, x1), max(y0, y1)),
                      (min(x0, x1), max(y0, y1))]
+            # An illegal crop drag (outside start overlapping a rotated
+            # ref) draws the same translucent rect in red instead of the
+            # selection colour - same 0.05 fill, same 1px outline.
+            mq_col = (0.95, 0.2, 0.12, sel_col[3]) \
+                if live_mq.get("illegal") else sel_col
             _refboard_draw_flat(
                 flat, 'TRI_FAN', mquad,
-                (sel_col[0] * 0.05, sel_col[1] * 0.05,
-                 sel_col[2] * 0.05, 0.05))
-            _refboard_outline(mquad, 1.0, sel_col)
+                (mq_col[0] * 0.05, mq_col[1] * 0.05,
+                 mq_col[2] * 0.05, 0.05))
+            _refboard_outline(mquad, 1.0, mq_col)
     finally:
         gpu.state.blend_set('NONE')
         gpu.state.line_width_set(1.0)
@@ -3956,7 +4087,7 @@ class REFBOARD_OT_interact(bpy.types.Operator):
                         fl["done"] = True
                 return {'RUNNING_MODAL'}
             if _refboard_cropmarq is not None and in_view:
-                _refboard_cropmarq["cur"] = (mx, my)
+                _refboard_cropmarq_update(scene, region, mx, my)
                 area.tag_redraw()
                 return {'RUNNING_MODAL'}
             if _refboard_marquee is not None and in_view:
@@ -4236,10 +4367,36 @@ class REFBOARD_OT_interact(bpy.types.Operator):
                 _refboard_cropmarq = None
                 x0, y0 = cm["m0"]
                 x1, y1 = cm["cur"]
-                if math.hypot(x1 - x0, y1 - y0) > 3.0 and \
-                        _refboard_apply_crop_rect(
+                did = False
+                if math.hypot(x1 - x0, y1 - y0) > 3.0:
+                    if cm.get("inside"):
+                        did = _refboard_apply_crop_rect(
                             scene, cm["region"], cm["idx"],
-                            x0, y0, x1, y1):
+                            x0, y0, x1, y1)
+                    elif not cm.get("illegal") and \
+                            cm.get("target") is not None:
+                        # Outside start over an unrotated ref: the crop is
+                        # the marquee's overlap with the visible rect.
+                        ti = cm["target"]
+                        items = scene.refboard_items
+                        if 0 <= ti < len(items) and \
+                                items[ti].image is not None:
+                            q = _refboard_crop_quad(
+                                items[ti], cm["region"], items[ti].image,
+                                _refboard_view(scene, cm["region"]))
+                            qx0 = min(pq[0] for pq in q)
+                            qx1 = max(pq[0] for pq in q)
+                            qy0 = min(pq[1] for pq in q)
+                            qy1 = max(pq[1] for pq in q)
+                            rx0 = max(min(x0, x1), qx0)
+                            rx1 = min(max(x0, x1), qx1)
+                            ry0 = max(min(y0, y1), qy0)
+                            ry1 = min(max(y0, y1), qy1)
+                            if rx1 - rx0 > 0.5 and ry1 - ry0 > 0.5:
+                                did = _refboard_apply_crop_rect(
+                                    scene, cm["region"], ti,
+                                    rx0, ry0, rx1, ry1)
+                if did:
                     _refboard_undo_push("Refboard Crop")
                 if in_view:
                     area.tag_redraw()
@@ -4313,13 +4470,29 @@ class REFBOARD_OT_interact(bpy.types.Operator):
                     scene.refboard_selected = -1
                     area.tag_redraw()
                 _refboard_group = []
-                # In canvas mode, LMB drag on empty space is the marquee.
-                _refboard_marquee = {
-                    "ptr": region.as_pointer(),
-                    "region": region,
-                    "m0": (mx, my),
-                    "cur": (mx, my),
-                }
+                if event.ctrl and not event.shift and not event.alt:
+                    # Ctrl+drag from empty space is a crop probe: over an
+                    # unrotated ref it crops to the overlap on release;
+                    # overlapping a rotated ref flags the drag illegal (red
+                    # marquee) and commits nothing.
+                    _refboard_cropmarq = {
+                        "ptr": region.as_pointer(),
+                        "region": region,
+                        "idx": None,
+                        "inside": False,
+                        "illegal": False,
+                        "target": None,
+                        "m0": (mx, my),
+                        "cur": (mx, my),
+                    }
+                else:
+                    # In canvas mode, LMB drag on empty space is the marquee.
+                    _refboard_marquee = {
+                        "ptr": region.as_pointer(),
+                        "region": region,
+                        "m0": (mx, my),
+                        "cur": (mx, my),
+                    }
                 return {'RUNNING_MODAL'}
             idx, zone, sub = hit
             if event.ctrl and event.shift:
@@ -4368,15 +4541,28 @@ class REFBOARD_OT_interact(bpy.types.Operator):
                     zone in ('inside', 'inside_temp'):
                 # Ctrl+LMB in the image interior is the crop marquee: drag
                 # out a screen-space rect, crop the image to it on release.
-                # The image never moves under a Ctrl drag. Pressing on a
-                # highlighted crop edge still edge-drags instead.
+                # The rect is clamped inside the visible crop quad every
+                # move, so it can never sweep off the image and skew the
+                # crop. Pressing on a highlighted crop edge still edge-drags
+                # instead. If m0 lands in the fitted rect's dead corner
+                # (outside the real quad) the drag falls back to the
+                # outside-start probe rules.
                 _refboard_cropmarq = {
                     "ptr": region.as_pointer(),
                     "region": region,
                     "idx": idx,
+                    "inside": _refboard_point_in_poly(
+                        mx, my, _refboard_crop_quad(
+                            scene.refboard_items[idx], region,
+                            scene.refboard_items[idx].image,
+                            _refboard_view(scene, region))),
+                    "illegal": False,
+                    "target": None,
                     "m0": (mx, my),
                     "cur": (mx, my),
                 }
+                if not _refboard_cropmarq["inside"]:
+                    _refboard_cropmarq["idx"] = None
                 area.tag_redraw()
                 return {'RUNNING_MODAL'}
             if zone == 'inside' and idx != sel:

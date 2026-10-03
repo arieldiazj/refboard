@@ -1131,6 +1131,98 @@ def main():
     check("per-item visible kept", item.visible)
 
     # ------------------------------------------------------------------
+    # -------------------------------------------------------------- P4b2
+    section("P4b2 crop marquee clamp + outside-start probe")
+    # A rotated ref's crop quad is a diamond on screen.
+    item.pos = (0.5, 0.5); item.scale = (1.0, 1.0)
+    item.rotation = _m.radians(45.0)
+    item.crop = (0.0, 0.0, 1.0, 1.0)
+    quad = ct._refboard_crop_quad(item, reg, item.image,
+                                  ct._refboard_view(scene, reg))
+    qcx = sum(qp[0] for qp in quad) * 0.25
+    qcy = sum(qp[1] for qp in quad) * 0.25
+
+    check("point in quad center", ct._refboard_point_in_poly(
+        qcx, qcy, quad))
+    far = (qcx + 10000.0, qcy + 10000.0)
+    check("point out of quad", not ct._refboard_point_in_poly(
+        far[0], far[1], quad))
+    check("axisaligned rect quad", ct._refboard_quad_axisaligned(
+        [(0, 0), (10, 0), (10, 10), (0, 10)]))
+    check("rotated quad not axisaligned", not ct._refboard_quad_axisaligned(
+        quad))
+    check("rect/poly overlap", ct._refboard_rect_poly_overlap(
+        qcx - 5, qcy - 5, qcx + 5, qcy + 5, quad))
+    check("rect/poly no overlap", not ct._refboard_rect_poly_overlap(
+        far[0], far[1], far[0] + 10, far[1] + 10, quad))
+
+    # Inside-start clamp: a drag far past the rotated quad must land all
+    # four rect corners inside it.
+    m0 = (qcx - 30.0, qcy - 20.0)
+    c = ct._refboard_marquee_clamp(m0, qcx + 800.0, qcy + 800.0, quad)
+    corners = [(min(m0[0], c[0]), min(m0[1], c[1])),
+               (max(m0[0], c[0]), min(m0[1], c[1])),
+               (max(m0[0], c[0]), max(m0[1], c[1])),
+               (min(m0[0], c[0]), max(m0[1], c[1]))]
+    check("clamped marquee stays inside rotated quad", all(
+        ct._refboard_point_in_poly(pq[0], pq[1], quad) for pq in corners),
+        str(corners))
+    check("clamped corner actually moved", c != m0, str(c))
+    # Same drag on an axis-aligned quad clamps like a plain rect.
+    item.rotation = 0.0
+    aq = ct._refboard_crop_quad(item, reg, item.image,
+                                ct._refboard_view(scene, reg))
+    ax0, ax1 = min(pq[0] for pq in aq), max(pq[0] for pq in aq)
+    ay0, ay1 = min(pq[1] for pq in aq), max(pq[1] for pq in aq)
+    m0a = ((ax0 + ax1) * 0.5, (ay0 + ay1) * 0.5)
+    ca = ct._refboard_marquee_clamp(m0a, ax1 + 500.0, ay1 + 500.0, aq)
+    check("aligned clamp stops at a wall",
+          abs(ca[0] - ax1) < 0.5 or abs(ca[1] - ay1) < 0.5, str(ca))
+    check("aligned clamp stays inside", all(
+        ct._refboard_point_in_poly(pq[0], pq[1], aq) for pq in
+        [(min(m0a[0], ca[0]), min(m0a[1], ca[1])),
+         (max(m0a[0], ca[0]), min(m0a[1], ca[1])),
+         (max(m0a[0], ca[0]), max(m0a[1], ca[1])),
+         (min(m0a[0], ca[0]), max(m0a[1], ca[1]))]))
+
+    # Update path on a real cropmarq: inside-start clamps via the item's
+    # quad; outside-start over the rotated quad flags illegal.
+    item.rotation = _m.radians(45.0)
+    ct._refboard_cropmarq = {
+        "ptr": reg.as_pointer(), "region": reg, "idx": 0,
+        "inside": True, "illegal": False, "target": None,
+        "m0": m0, "cur": m0}
+    ct._refboard_cropmarq_update(scene, reg,
+                                 qcx + 800.0, qcy + 800.0)
+    cc = ct._refboard_cropmarq["cur"]
+    check("inside-start cur clamped", ct._refboard_point_in_poly(
+        cc[0], cc[1], ct._refboard_crop_quad(item, reg, item.image,
+                                             ct._refboard_view(scene, reg))),
+        str(cc))
+    ct._refboard_cropmarq = {
+        "ptr": reg.as_pointer(), "region": reg, "idx": None,
+        "inside": False, "illegal": False, "target": None,
+        "m0": (0.0, 0.0), "cur": (0.0, 0.0)}
+    ct._refboard_cropmarq_update(scene, reg, qcx, qcy)
+    check("outside-start over rotated quad is illegal",
+          ct._refboard_cropmarq["illegal"] is True)
+    ct._refboard_cropmarq["m0"] = far
+    ct._refboard_cropmarq_update(scene, reg, far[0] + 10.0, far[1] + 10.0)
+    check("far drag clears illegal+target",
+          ct._refboard_cropmarq["illegal"] is False and
+          ct._refboard_cropmarq["target"] is None)
+    item.rotation = 0.0
+    ct._refboard_cropmarq["m0"] = (0.0, 0.0)
+    ct._refboard_cropmarq_update(
+        scene, reg, (ax0 + ax1) * 0.5, (ay0 + ay1) * 0.5)
+    check("outside-start over aligned quad targets it",
+          ct._refboard_cropmarq["target"] == 0 and
+          ct._refboard_cropmarq["illegal"] is False)
+    ct._refboard_cropmarq = None
+    ct._refboard_restore(item, ((0.5, 0.5), (1.0, 1.0), 0.0,
+                               (0.0, 0.0, 1.0, 1.0), 1.0,
+                               (0.0, 0.0, 1.0, 0.0, 1.0, 1.0, 0.0, 1.0)))
+
     section("P4c marquee group select and collective edits")
     # Two items side by side in an 800x600 region.
     item.pos = (0.3, 0.5)
