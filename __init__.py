@@ -4423,6 +4423,12 @@ class REFBOARD_OT_interact(bpy.types.Operator):
                             bpy.ops.refboard.paste('INVOKE_DEFAULT')
                         except Exception:
                             pass
+                    else:
+                        try:
+                            context.window.status_text_set(
+                                "Refboard: no image on the clipboard")
+                        except Exception:
+                            pass
                 else:
                     _refboard_copy_selected(scene)
             return {'RUNNING_MODAL'}
@@ -4652,6 +4658,7 @@ class REFBOARD_OT_paste(bpy.types.Operator):
         if not _refboard_clipboard_has_image():
             # Inside edit mode the key belongs to Refboard: no image means
             # "nothing to paste", not "defer to Blender's object paste".
+            self.report({'INFO'}, "Refboard: no image on the clipboard")
             return {'CANCELLED'}
         pos = (0.5, 0.5)
         rw = rh = 0
