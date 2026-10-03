@@ -1523,9 +1523,10 @@ def main():
     w, h = 8, 8
     dib = _st.pack("<IiiHHIIiiII", 40, w, h, 1, 32, 0, w * h * 4,
                    0, 0, 0, 0) + b"\x40\x80\xC0\xFF" * (w * h)
-    bmp_bytes = ct._refboard_dib_to_bmp(dib)
-    check("dib wraps into a bmp", bmp_bytes is not None and
-          bmp_bytes[:2] == b"BM")
+    conv = ct._refboard_dib_to_bmp(dib)
+    check("dib wraps into a bmp", conv is not None and conv[0] == ".bmp"
+          and conv[1][:2] == b"BM")
+    bmp_bytes = conv[1] if conv else b""
     check("bmp file size in header",
           _st.unpack_from("<I", bmp_bytes, 2)[0] == 14 + len(dib))
     bmp_path = os.path.join(tmp, "dib_rt.bmp")
@@ -1537,6 +1538,42 @@ def main():
     bpy.data.images.remove(bmp_img)
 
     # ------------------------------------------------------------------
+    # Header/bounds validation: malformed and unsupported DIBs refuse.
+    dib6 = bytearray(dib)
+    _st.pack_into("<I", dib6, 16, 6)      # BI_ALPHABITFIELDS -> 4 masks
+    conv6 = ct._refboard_dib_to_bmp(bytes(dib6) + b"\x00" * 16)
+    check("alphabitfields dib gets 4 masks", conv6 is not None and
+          conv6[0] == ".bmp" and
+          _st.unpack_from("<I", conv6[1], 10)[0] == 14 + 40 + 16)
+    rle = bytearray(dib)
+    _st.pack_into("<I", rle, 16, 2)       # BI_RLE8 - unsupported
+    check("rle dib refused", ct._refboard_dib_to_bmp(bytes(rle)) is None)
+    bad = bytearray(dib)
+    _st.pack_into("<i", bad, 4, 70000)    # absurd width
+    check("oversize dib refused", ct._refboard_dib_to_bmp(bytes(bad))
+          is None)
+    # BI_PNG: the pixel area is a whole PNG file - extract it verbatim.
+    fake_png = b"\x89PNG\r\n\x1a\n" + b"payload"
+    dibp = bytearray(dib)
+    _st.pack_into("<I", dibp, 16, 5)
+    convp = ct._refboard_dib_to_bmp(bytes(dibp) + fake_png)
+    check("bi_png extracts embedded stream",
+          convp is not None and convp[0] == ".png" and
+          convp[1][-len(fake_png):] == fake_png)
+    # _refboard_finish rejects files that decode to nothing.
+    n0 = len(scene.refboard_items)
+    bad_img = os.path.join(tmp, "notimg.png")
+    with open(bad_img, "wb") as f:
+        f.write(b"this is not an image at all")
+    threw = False
+    try:
+        ct._refboard_finish({"dst": bad_img, "mode": 'SCREEN',
+                             "state": {"scene": scene}})
+    except Exception:
+        threw = True
+    check("undecodable paste refused", threw and
+          len(scene.refboard_items) == n0)
+
     section("P7 clipboard image gate")
     if ct.platform.system() == "Windows":
         try:

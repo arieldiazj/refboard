@@ -612,6 +612,10 @@ def _refboard_clipboard_has_image():
             fmt = _refboard_u32.RegisterClipboardFormatW(name)
             if fmt and _refboard_u32.IsClipboardFormatAvailable(fmt):
                 return True
+        # CF_HDROP means the clipboard holds *files*; the bitmap beside it
+        # is the file's icon, not something the user expects to paste.
+        if _refboard_u32.IsClipboardFormatAvailable(15):
+            return False
         # CF_DIBV5, CF_DIB, CF_BITMAP - bitmaps synthesize to DIB on read.
         for fmt in (17, 8, 2):
             if _refboard_u32.IsClipboardFormatAvailable(fmt):
@@ -663,20 +667,37 @@ if platform.system() == "Windows":
 
 
 def _refboard_dib_to_bmp(raw):
-    """Wrap raw DIB bytes (BITMAPINFOHEADER + palette + pixels) in a BMP file
-    header so Blender can load the clipboard image directly."""
-    if len(raw) < 20:
+    """Convert raw DIB bytes (BITMAPINFOHEADER + palette + pixels) into a
+    file Blender can load: a BMP wrapper for plain bitmaps, or the embedded
+    stream itself for BI_JPEG/BI_PNG DIBs. Returns (ext, bytes) or None for
+    payloads the wrapper can't honor (RLE, bad headers) - the caller falls
+    back to the PowerShell grab for those."""
+    if len(raw) < 36:
         return None
     hdr = struct.unpack_from("<I", raw, 0)[0]
+    w = struct.unpack_from("<i", raw, 4)[0]
+    h = struct.unpack_from("<i", raw, 8)[0]
     bpp = struct.unpack_from("<H", raw, 14)[0]
     comp = struct.unpack_from("<I", raw, 16)[0]
-    used = struct.unpack_from("<I", raw, 32)[0] if len(raw) >= 36 else 0
+    used = struct.unpack_from("<I", raw, 32)[0]
+    if hdr < 40 or hdr + 14 > len(raw) or w == 0 or h == 0 or             abs(w) > 16384 or abs(h) > 16384:
+        return None
     ncolors = used or (1 << bpp if bpp <= 8 else 0)
-    # On a 40-byte BITMAPINFOHEADER, BI_BITFIELDS masks live right after the
-    # header; in BITMAPV5HEADER they are embedded already.
-    masks = 12 if hdr == 40 and comp == 3 else 0
+    # On a 40-byte BITMAPINFOHEADER the bitfield masks live right after the
+    # header (3 for BI_BITFIELDS, 4 for BI_ALPHABITFIELDS); V4/V5 headers
+    # embed them already.
+    masks = 0 if hdr > 40 else {3: 12, 6: 16}.get(comp, 0)
     off = 14 + hdr + ncolors * 4 + masks
-    return struct.pack("<2sIHHI", b"BM", 14 + len(raw), 0, 0, off) + raw
+    if off > 14 + len(raw):
+        return None
+    if comp in (4, 5):
+        # BI_JPEG / BI_PNG: the "pixel" area IS a complete image file.
+        ext = ".jpg" if comp == 4 else ".png"
+        return ext, raw[off - 14:]
+    if comp not in (0, 3, 6):
+        return None
+    return ".bmp", struct.pack(
+        "<2sIHHI", b"BM", 14 + len(raw), 0, 0, off) + raw
 
 
 def _refboard_clip_read_fmt(fmt):
@@ -714,20 +735,25 @@ def _refboard_clipboard_image_win(dst_base):
         for name in ("PNG", "image/png"):
             fmt = _refboard_u32.RegisterClipboardFormatW(name)
             raw = _refboard_clip_read_fmt(fmt) if fmt else None
-            if raw:
+            # Some apps register a "PNG" format whose payload is anything
+            # but - verify the signature or Blender loads garbage/magenta.
+            if raw and raw[:8] == b"\x89PNG\r\n\x1a\n":
                 out = os.path.splitext(dst_base)[0] + ".png"
                 with open(out, "wb") as f:
                     f.write(raw)
                 return out
-        for fmt in (17, 8):          # CF_DIBV5, CF_DIB
-            raw = _refboard_clip_read_fmt(fmt)
-            if raw:
-                bmp = _refboard_dib_to_bmp(raw)
-                if bmp:
-                    out = os.path.splitext(dst_base)[0] + ".bmp"
-                    with open(out, "wb") as f:
-                        f.write(bmp)
-                    return out
+        # CF_HDROP + a bitmap = a file's icon, not a pasted image.
+        if not _refboard_u32.IsClipboardFormatAvailable(15):
+            for fmt in (17, 8):          # CF_DIBV5, CF_DIB
+                raw = _refboard_clip_read_fmt(fmt)
+                if raw:
+                    conv = _refboard_dib_to_bmp(raw)
+                    if conv:
+                        ext, data = conv
+                        out = os.path.splitext(dst_base)[0] + ext
+                        with open(out, "wb") as f:
+                            f.write(data)
+                        return out
     finally:
         _refboard_u32.CloseClipboard()
     return None
@@ -2640,6 +2666,16 @@ def _refboard_finish(p):
     if not os.path.isfile(dst) or os.path.getsize(dst) == 0:
         return
     img = _refboard_adopt(dst)
+    # size access forces the lazy decode: a garbage payload keeps (0, 0).
+    if img.size[0] <= 0 or img.size[1] <= 0:
+        # A clipboard payload that looks like an image but decodes to
+        # nothing would draw as a flat magenta quad at default scale -
+        # scrap the datablock and fail the paste instead.
+        try:
+            bpy.data.images.remove(img)
+        except Exception:
+            pass
+        raise RuntimeError("clipboard image could not be decoded")
     if not st.get("filepath") and not img.name.startswith("Refboard"):
         img.name = "Refboard"
     if p["mode"] == 'SCREEN':
