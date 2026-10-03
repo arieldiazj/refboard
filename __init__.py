@@ -2527,9 +2527,7 @@ def _refboard_mode_flash_visible(scene):
         return True
     # Edit mode announces itself even before the first paste - the veil is
     # up and the label is how the paste-into-edit-mode flow is discovered.
-    # Notices (no-image paste, ...) are shown too; only the show/hide mode
-    # glyphs stay suppressed on an empty board.
-    return _refboard_mode_label not in ("Refboard Exit", "Refboard Off")
+    return _refboard_mode_label == "Refboard Edit"
 
 
 _refboard_icon_cache = {}
@@ -2541,9 +2539,6 @@ _REFBOARD_MODE_ICONS = (
     ("Refboard Exit", "visible.png"),
     ("Refboard Off", "invisible.png"),
 )
-
-# Mode labels proper - anything else in _refboard_mode_label is a notice.
-_REFBOARD_MODE_LABELS = ("Refboard Edit", "Refboard Exit", "Refboard Off")
 
 # Peak opacity of the mode glyph, before the flash fade is applied.
 _REFBOARD_MODE_ICON_ALPHA = 0.5
@@ -2669,18 +2664,6 @@ def _refboard_draw_edit_caption(region):
         blf.color(0, 0.95, 0.95, 0.95, 0.9)
         blf.position(0, region.width * 0.5 - tw * 0.5, 34.0, 0)
         blf.draw(0, text)
-        # Transient notices flash just above the caption; the caption
-        # itself never fades. Same 1.5s ease as the mode glyph.
-        age = time.time() - _refboard_mode_ts
-        label = _refboard_mode_label
-        if label and label not in _REFBOARD_MODE_LABELS and age < 1.5:
-            mfade = 1.0 - age / 1.5
-            blf.size(0, size)
-            nw, nh = blf.dimensions(0, label)
-            blf.color(0, 0.95, 0.95, 0.95, 0.95 * mfade)
-            blf.position(0, region.width * 0.5 - nw * 0.5, 58.0, 0)
-            blf.draw(0, label)
-            region.tag_redraw()
         blf.disable(0, blf.SHADOW)
     except Exception:
         try:
@@ -2820,16 +2803,6 @@ def _refboard_redraw_views():
                     a.tag_redraw()
     except Exception:
         pass
-
-
-def _refboard_notice(text):
-    """Flash a short message in the mode-label slot (bottom-center, ~1.5s
-    fade). Works in and out of edit mode - the caption branch draws it
-    while the veil is up, the normal flash path otherwise."""
-    global _refboard_mode_label, _refboard_mode_ts
-    _refboard_mode_label = text
-    _refboard_mode_ts = time.time()
-    _refboard_redraw_views()
 
 
 def _refboard_flag_update(item, context):
@@ -4637,7 +4610,6 @@ class REFBOARD_OT_interact(bpy.types.Operator):
                         except Exception:
                             pass
                     else:
-                        _refboard_notice("No image on the clipboard")
                         try:
                             context.window.status_text_set(
                                 "Refboard: no image on the clipboard")
@@ -4873,7 +4845,6 @@ class REFBOARD_OT_paste(bpy.types.Operator):
             # Inside edit mode the key belongs to Refboard: no image means
             # "nothing to paste", not "defer to Blender's object paste".
             self.report({'INFO'}, "Refboard: no image on the clipboard")
-            _refboard_notice("No image on the clipboard")
             return {'CANCELLED'}
         pos = (0.5, 0.5)
         rw = rh = 0
