@@ -28,7 +28,7 @@ except Exception:
 bl_info = {
     "name": "Refboard",
     "author": "AD",
-    "version": (0, 2, 0),
+    "version": (0, 2, 1),
     "blender": (4, 0, 0),
     "location": "View3D > Sidebar > Refboard",
     "category": "3D View",

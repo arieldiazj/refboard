@@ -1603,7 +1603,7 @@ def main():
     section("P9 preferences + N-panel hide/restore")
     prefs = ctx.preferences.addons["refboard"].preferences
     check("bl_info version floor (bump before each release tag)",
-          ct.bl_info["version"] >= (0, 2, 0), str(ct.bl_info["version"]))
+          ct.bl_info["version"] >= (0, 2, 1), str(ct.bl_info["version"]))
     check("pref show_n_panel default off", not prefs.show_n_panel)
     check("pref show_help default on", prefs.show_help)
     check("pref help_size default", abs(prefs.help_size - 16.0) < 1e-6)
