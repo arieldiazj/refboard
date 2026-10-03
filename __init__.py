@@ -28,7 +28,7 @@ except Exception:
 bl_info = {
     "name": "Refboard",
     "author": "AD",
-    "version": (0, 1, 0),
+    "version": (0, 2, 0),
     "blender": (4, 0, 0),
     "location": "View3D > Sidebar > Refboard",
     "category": "3D View",
@@ -3601,7 +3601,8 @@ class REFBOARD_OT_interact(bpy.types.Operator):
         global _refboard_flick
         scene = context.scene
         items = getattr(scene, "refboard_items", None) if scene else None
-        if (items is None or len(items) == 0) and _refboard_drag is None:
+        if (items is None or len(items) == 0) and _refboard_drag is None \
+                and not _refboard_canvas_on:
             _refboard_modal_running = False
             return {'FINISHED'}
 
@@ -3615,7 +3616,7 @@ class REFBOARD_OT_interact(bpy.types.Operator):
             # stays True forever. Die and respawn on the new screen's
             # 3D view.
             _refboard_modal_running = False
-            if items is not None and len(items) > 0:
+            if _refboard_canvas_on or (items is not None and len(items) > 0):
                 _refboard_ensure_modal()
                 if not _refboard_modal_running:
                     _refboard_kick_boot_timer()
@@ -3735,6 +3736,8 @@ class REFBOARD_OT_interact(bpy.types.Operator):
                     area.tag_redraw()
             elif _refboard_hover is not None:
                 _refboard_hover = None
+            if in_view and _refboard_canvas_on:
+                return {'RUNNING_MODAL'}
             return {'PASS_THROUGH'}
 
         if event.type == 'ACCENT_GRAVE':
@@ -3810,7 +3813,7 @@ class REFBOARD_OT_interact(bpy.types.Operator):
                 return {'PASS_THROUGH'}
             if event.value != 'PRESS' or not in_view or \
                     _refboard_drag is not None or \
-                    not _refboard_canvas_mode(scene):
+                    not _refboard_canvas_on:
                 return {'PASS_THROUGH'}
             _refboard_pan_drag = {
                 "pan0": tuple(scene.refboard_view_pan),
@@ -3821,7 +3824,7 @@ class REFBOARD_OT_interact(bpy.types.Operator):
         if event.type in {'WHEELUPMOUSE', 'WHEELDOWNMOUSE',
                           'WHEELINMOUSE', 'WHEELOUTMOUSE'}:
             if event.value != 'PRESS' or not in_view or \
-                    not _refboard_canvas_mode(scene):
+                    not _refboard_canvas_on:
                 return {'PASS_THROUGH'}
             zoom0 = float(scene.refboard_view_zoom)
             step = 1.15
@@ -3844,7 +3847,7 @@ class REFBOARD_OT_interact(bpy.types.Operator):
                     area.tag_redraw()
                 return {'RUNNING_MODAL'}
             if event.value == 'PRESS' and event.alt and in_view and \
-                    _refboard_drag is None and _refboard_canvas_mode(scene):
+                    _refboard_drag is None and _refboard_canvas_on:
                 _refboard_zoom_drag = {
                     "zoom0": float(scene.refboard_view_zoom),
                     "m0": (event.mouse_region_x, event.mouse_region_y),
@@ -4103,7 +4106,7 @@ class REFBOARD_OT_interact(bpy.types.Operator):
             return {'RUNNING_MODAL'}
 
         if event.type in {'C', 'V'} and event.value == 'PRESS':
-            if not in_view or not _refboard_canvas_mode(scene):
+            if not in_view or not _refboard_canvas_on:
                 return {'PASS_THROUGH'}
             if event.ctrl and not event.shift and not event.alt:
                 if event.type == 'V':
@@ -4162,18 +4165,16 @@ class REFBOARD_OT_interact(bpy.types.Operator):
                 area.tag_redraw()
             return {'RUNNING_MODAL'}
 
-        # Canvas mode owns the keyboard: every assigned gesture already
-        # returned above, so anything left over (Blender hotkeys like G,
-        # Tab, ...) is swallowed instead of leaking into the 3D scene.
-        # Only real key/button events are eaten - timers, mouse moves and
-        # other value-less traffic still pass. EVT_DROP (file drop onto a
+        # Edit mode owns the viewport: every assigned gesture already
+        # returned above, so anything left over (Blender hotkeys, scene
+        # navigation, mouse traffic) is swallowed instead of leaking into
+        # the 3D scene - empty board included, since canvas_mode() needs
+        # items but the veil is up regardless. EVT_DROP (file drop onto a
         # region) must pass so it can reach the FileHandler dropboxes;
         # it isn't in the public event-type enum, so it may surface as
         # 'EVT_DROP' or as an empty identifier - allow both.
-        if _refboard_canvas_mode(scene) and in_view and \
-                event.type not in {'EVT_DROP', 'NONE', ''} and \
-                event.value in {'PRESS', 'RELEASE', 'DOUBLE_CLICK',
-                                'CLICK'}:
+        if _refboard_canvas_on and in_view and \
+                event.type not in {'EVT_DROP', 'NONE', ''}:
             return {'RUNNING_MODAL'}
 
         return {'PASS_THROUGH'}
