@@ -4637,23 +4637,13 @@ class REFBOARD_OT_interact(bpy.types.Operator):
                 return {'PASS_THROUGH'}
             if event.ctrl and not event.shift and not event.alt:
                 if event.type == 'V':
-                    # Same path as the Ctrl+V keymap item, driven from
-                    # here because canvas mode swallows keymap input.
-                    # With an image the op runs nested so the ref lands
-                    # under the cursor. With none, the key passes through
-                    # to the keymap: reports only toast when dispatched
-                    # from a real event, so whichever op wins (ours, or
-                    # Blender's object.paste) emits the native "nothing to
-                    # paste" toast + Info entry.
-                    if _refboard_clipboard_has_image():
-                        try:
-                            bpy.ops.refboard.paste('INVOKE_DEFAULT')
-                        except Exception:
-                            pass
-                    else:
-                        _refboard_status(
-                            "Refboard: no image on the clipboard")
-                        return {'PASS_THROUGH'}
+                    # Let the keymap dispatch refboard.paste itself:
+                    # reports only toast when the op was reached via a
+                    # real key event - nested bpy.ops calls never pop the
+                    # bubble. The Object Mode binding wins over
+                    # object.paste, so gate/report/paste all stay ours and
+                    # scene objects can't slip in behind the veil.
+                    return {'PASS_THROUGH'}
                 else:
                     _refboard_copy_selected(scene)
             return {'RUNNING_MODAL'}
