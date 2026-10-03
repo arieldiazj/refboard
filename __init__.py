@@ -3059,6 +3059,37 @@ def _refboard_drag_update(scene, region, mx, my, event=None):
                     hi = min(hi, -coord / delta)
                     lo = max(lo, (1.0 - coord) / delta)
         off = max(lo, min(hi, off))
+        # Inward slide on a rotated (sheared) quad: the screen-normal step
+        # maps to a UV direction with a lateral component, so an endpoint
+        # can shoot past an ADJACENT border of the drag-start quad and
+        # flip the new quad into a bowtie - the skew seen when re-cropping
+        # a rotated, already-cropped ref. Stop the edge the moment either
+        # endpoint would cross ANY border of the original quad (convex
+        # half-plane test; the centroid fixes the inside sign). Outward
+        # moves are bounded by the texture clamp above instead.
+        if off > 0.0:
+            qcx = sum(pt[0] for pt in pts) * 0.25
+            qcy = sum(pt[1] for pt in pts) * 0.25
+            for k in (ai, bi):
+                pqx, pqy = pts[k]
+                for j in range(4):
+                    jax, jay = pts[j]
+                    jex = pts[(j + 1) % 4][0] - jax
+                    jey = pts[(j + 1) % 4][1] - jay
+                    cs = jex * (qcy - jay) - jey * (qcx - jax)
+                    if abs(cs) < 1e-12:
+                        continue
+                    sgn = 1.0 if cs > 0.0 else -1.0
+                    c0 = sgn * (jex * (pqy - jay) - jey * (pqx - jax))
+                    c1 = sgn * (jex * dv - jey * du)
+                    # inside the edge's half-plane: c0 + off * c1 >= 0
+                    # c1 ~ |edge|*|delta| ~1e-3 for a real approach;
+                    # near-parallel drift is float noise (~1e-9), not an
+                    # exit - treat anything under 1e-7 as parallel.
+                    if c1 < -1e-7:
+                        off = max(0.0, min(off, c0 / -c1))
+                    elif c0 < -1e-7:
+                        off = 0.0
         pa, pb = pts[ai], pts[bi]
         pts[ai] = (pa[0] + du * off, pa[1] + dv * off)
         pts[bi] = (pb[0] + du * off, pb[1] + dv * off)

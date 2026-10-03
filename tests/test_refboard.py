@@ -771,6 +771,59 @@ def main():
                                (0.0, 0.0, 1.0, 0.0, 1.0, 1.0, 0.0, 1.0)))
     check("restore resets quad", abs(item.crop_pts[2] - 1.0) < 1e-6)
 
+    # Re-crop a rotated+marquee-cropped ref: a big inward edge drag must
+    # stop at the first ORIGINAL-quad border the new edge would cross -
+    # letting it run on flips the quad into a bowtie (the skew bug).
+    item.pos = (0.5, 0.5)
+    item.rotation = _m.radians(40.0)
+    item.crop = (0.0, 0.0, 1.0, 1.0)
+    ct._refboard_apply_crop_rect(scene, reg, 0, 370, 270, 440, 330)
+    base_pts = [tuple(p) for p in ct._refboard_crop_uvs(item)]
+    bcx = sum(p[0] for p in base_pts) * 0.25
+    bcy = sum(p[1] for p in base_pts) * 0.25
+
+    def _in_quad(pt):
+        for j in range(4):
+            ax_, ay_ = base_pts[j]
+            ex_, ey_ = base_pts[(j + 1) % 4][0] - ax_, \
+                base_pts[(j + 1) % 4][1] - ay_
+            cs = ex_ * (bcy - ay_) - ey_ * (bcx - ax_)
+            if abs(cs) < 1e-12:
+                continue
+            sgn = 1.0 if cs > 0.0 else -1.0
+            if sgn * (ex_ * (pt[1] - ay_) - ey_ * (pt[0] - ax_)) \
+                    < -1e-6:
+                return False
+        return True
+
+    ct._refboard_drag_set({
+        "index": 0, "mode": 'crop', "sub": 2, "temp": False,
+        "moved": False, "m0": (440, 300), "snap": ct._refboard_snapshot(item),
+        "pos0": tuple(item.pos), "scale0": (1.0, 1.0),
+        "rot0": item.rotation,
+        "crop0": tuple(item.crop), "local0": (0.0, 0.0),
+        "crop_uv0": tuple(v for p in ct._refboard_crop_uvs(item) for v in p),
+        "angle0": 0.0, "dist0": 1.0, "screen_dist0": 1.0})
+    ct._refboard_drag_update(scene, reg, 330, 300)  # far past the opposite edge
+    pts2 = [tuple(p) for p in ct._refboard_crop_uvs(item)]
+    # moved edge endpoints: sub 2 = right edge = pts 1-2
+    check("recrop stays inside original quad",
+          _in_quad(pts2[1]) and _in_quad(pts2[2]),
+          str(pts2))
+    # convexity: consecutive edge cross products share one sign
+    signs = []
+    for i in range(4):
+        a, b, c = pts2[i], pts2[(i + 1) % 4], pts2[(i + 2) % 4]
+        signs.append((b[0] - a[0]) * (c[1] - b[1]) -
+                     (b[1] - a[1]) * (c[0] - b[0]))
+    check("recrop quad stays convex (no bowtie)",
+          all(x > -1e-9 for x in signs) or
+          all(x < 1e-9 for x in signs), str(signs))
+    ct._refboard_drag_set(None)
+    ct._refboard_restore(item, ((0.5, 0.5), (1.0, 1.0), 0.0,
+                               (0.0, 0.0, 1.0, 1.0), 1.0,
+                               (0.0, 0.0, 1.0, 0.0, 1.0, 1.0, 0.0, 1.0)))
+
     # Rotated + off-center marquee crop: rotate and center-scale must
     # pivot on the CROP quad's centroid, not the uncropped image center
     # (pos) - the visible chunk must not orbit or drift.
