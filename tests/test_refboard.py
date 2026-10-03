@@ -2021,6 +2021,27 @@ def main():
               it4 is not None and abs(it4.pos[0] - 0.95) < 1e-6)
 
     # ------------------------------------------------------------------
+    section("P13 saturation channel")
+    png_s = make_png(os.path.join(tmp, "p13.png"))
+    ct._refboard_finish({"dst": png_s, "mode": 'SCREEN',
+                        "state": {"pos": (0.5, 0.5), "scene": scene,
+                                  "rw": 800, "rh": 600}})
+    its = scene.refboard_items[-1]
+    check("saturation defaults to full",
+          abs(its.saturation - 1.0) < 1e-6)
+    its.saturation = 0.25
+    ct._refboard_undo_push("T")
+    its.saturation = 0.9
+    ct._refboard_undo_push("T")
+    ct._refboard_undo_step(scene)
+    its2 = scene.refboard_items[-1]
+    check("undo round-trips saturation",
+          abs(its2.saturation - 0.25) < 1e-6, str(its2.saturation))
+    ct._refboard_reset_item(scene, len(scene.refboard_items) - 1)
+    check("full reset restores saturation",
+          abs(scene.refboard_items[-1].saturation - 1.0) < 1e-6)
+
+    # ------------------------------------------------------------------
     print(f"\n=== RESULT: {PASS_COUNT} passed, {FAIL_COUNT} failed ===",
           flush=True)
     return 1 if FAIL_COUNT else 0

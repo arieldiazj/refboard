@@ -548,6 +548,14 @@ class RefboardItem(bpy.types.PropertyGroup):
         max=1.0,
         update=lambda self, context: _refboard_redraw_views(),
     )
+    # Display-only color saturation: 0 = grayscale, 1 = full color.
+    saturation: bpy.props.FloatProperty(
+        name="Saturation",
+        default=1.0,
+        min=0.0,
+        max=1.0,
+        update=lambda self, context: _refboard_redraw_views(),
+    )
     visible: bpy.props.BoolProperty(
         name="Visible",
         default=True,
@@ -1792,13 +1800,16 @@ def _refboard_shaders():
             ci.sampler(0, "FLOAT_2D", "image")
             ci.push_constant("MAT4", "ModelViewProjectionMatrix")
             ci.push_constant("FLOAT", "opacity")
+            ci.push_constant("FLOAT", "saturation")
             ci.fragment_out(0, "VEC4", "fragColor")
             ci.vertex_source(
                 "void main(){ uvInterp = texCoord; gl_Position = "
                 "ModelViewProjectionMatrix * vec4(pos, 0.0, 1.0); }")
             ci.fragment_source(
-                "void main(){ fragColor = texture(image, uvInterp) * "
-                "vec4(opacity, opacity, opacity, opacity); }")
+                "void main(){ vec4 c = texture(image, uvInterp); "
+                "float l = dot(c.rgb, vec3(0.2126, 0.7152, 0.0722)); "
+                "fragColor = vec4(mix(vec3(l), c.rgb, saturation), c.a) "
+                "* vec4(opacity); }")
             _REFBOARD_TEX_SHADER = gpu.shader.create_from_info(ci)
             _REFBOARD_TEX_SHADER_NEEDS_MVP = True
         except Exception:
@@ -2208,6 +2219,8 @@ def _draw_refboard():
                             "ModelViewProjectionMatrix", _refboard_mvp())
                         tex_shader.uniform_float(
                             "opacity", item.opacity * 0.15)
+                        tex_shader.uniform_float(
+                            "saturation", item.saturation)
                     tex_shader.uniform_sampler("image", tex)
                     fbatch.draw(tex_shader)
                 except Exception:
@@ -2221,6 +2234,7 @@ def _draw_refboard():
                     tex_shader.uniform_float(
                         "ModelViewProjectionMatrix", _refboard_mvp())
                     tex_shader.uniform_float("opacity", item.opacity)
+                    tex_shader.uniform_float("saturation", item.saturation)
                 tex_shader.uniform_sampler("image", tex)
                 batch.draw(tex_shader)
             except Exception:
@@ -2352,7 +2366,7 @@ def _draw_refboard():
     if blf is not None and _refboard_opacity_label is not None and \
             items is not None:
         try:
-            lptr, lidx, until = _refboard_opacity_label
+            lptr, lidx, until, attr = _refboard_opacity_label
             if lptr == region.as_pointer() and until > time.time():
                 rect = None
                 op = 1.0
@@ -2380,7 +2394,7 @@ def _draw_refboard():
                                     (max(ys) - min(ys)) * 0.5,
                                     (min(xs) + max(xs)) * 0.5,
                                     (min(ys) + max(ys)) * 0.5, 0.0)
-                    ops = [items[j].opacity for j in idxs
+                    ops = [getattr(items[j], attr) for j in idxs
                            if j < len(items)]
                     op = sum(ops) / len(ops) if ops else 1.0
                 elif 0 <= lidx < len(items):
@@ -2388,7 +2402,7 @@ def _draw_refboard():
                     img = item.image
                     rect = _refboard_rect(item, region, img, view) \
                         if img is not None else None
-                    op = item.opacity
+                    op = getattr(item, attr)
                 if rect is not None:
                     quad = _refboard_quad(rect)
                     xs = [q[0] for q in quad]
@@ -2405,11 +2419,12 @@ def _draw_refboard():
                         # Board-wide drag: caption the readout so it isn't
                         # a bare floating number.
                         blf.size(0, 13.0)
-                        lw = blf.dimensions(0, "Global Opacity")[0]
+                        cap = "Global " + attr.capitalize()
+                        lw = blf.dimensions(0, cap)[0]
                         blf.position(0, cx - lw * 0.5,
                                      min(ys) - 10.0, 0)
                         blf.color(0, 1.0, 1.0, 1.0, 0.75)
-                        blf.draw(0, "Global Opacity")
+                        blf.draw(0, cap)
         except Exception:
             pass
 
@@ -2748,6 +2763,7 @@ _REFBOARD_HELP_LINES = (
     ("Mode", "` board or ALT+` edit"),
     ("Menu", "RMB options"),
     ("Opacity", "CTRL+RMB drag"),
+    ("Saturation", "SHIFT+RMB drag"),
     ("Copy/Paste", "CTRL+C or CTRL+V"),
     ("Undo/Redo", "CTRL+Z or CTRL+SHIFT+Z"),
     ("Pan", "MMB or ALT+MMB drag"),
@@ -2982,7 +2998,7 @@ def _refboard_snapshot(item):
     return (tuple(item.pos), tuple(item.scale),
             item.rotation, tuple(item.crop), item.opacity,
             tuple(item.crop_pts), tuple(item.home_scale),
-            (item.flip_x, item.flip_y))
+            (item.flip_x, item.flip_y), item.saturation)
 
 
 def _refboard_restore(item, snap):
@@ -2994,6 +3010,8 @@ def _refboard_restore(item, snap):
         item.home_scale = snap[6]
     if len(snap) >= 8:
         item.flip_x, item.flip_y = snap[7]
+    if len(snap) >= 9:
+        item.saturation = snap[8]
 
 
 def _refboard_start_drag(scene, region, idx, zone, sub, mx, my,
@@ -3058,6 +3076,7 @@ def _refboard_start_drag(scene, region, idx, zone, sub, mx, my,
         "cpiv": cpiv,
         "cpiv_img": (cu * piw, cv * pih),
         "op0": item.opacity,
+        "sat0": item.saturation,
         "button": button,
         "angle0": math.atan2(cmy - cpiv[1], cmx - cpiv[0]),
         "dist0": max(1e-4, math.hypot(lx - rect[0], ly - rect[1])),
@@ -3067,7 +3086,7 @@ def _refboard_start_drag(scene, region, idx, zone, sub, mx, my,
 
 
 def _refboard_group_start_drag(scene, region, zone, sub, mx, my,
-                              button='LEFTMOUSE'):
+                              button='LEFTMOUSE', attr='opacity'):
     """Begin a collective drag on the marquee group. The shared pivot is the
     group bbox's: opposite corner/edge-midpoint for scale drags (same anchor
     rules as a single ref) and the bbox center for rotate/center-scale."""
@@ -3082,7 +3101,7 @@ def _refboard_group_start_drag(scene, region, zone, sub, mx, my,
         if 0 <= i < len(scene.refboard_items):
             it = scene.refboard_items[i]
             members.append((i, tuple(it.pos), tuple(it.scale),
-                            it.rotation, tuple(it.crop), it.opacity))
+                            it.rotation, tuple(it.crop), getattr(it, attr)))
     pivot = (px, py)
     grab = (cmx, cmy)
     if zone == 'corner':
@@ -3107,6 +3126,7 @@ def _refboard_group_start_drag(scene, region, zone, sub, mx, my,
         "button": button,
         "snap": None,
         "group_members": members,
+        "channel": attr,
         "grect": grect,
         "pivot": pivot,
         "grab": grab,
@@ -3129,6 +3149,7 @@ def _refboard_drag_set(d):
 
 
 def _refboard_drag_update(scene, region, mx, my, event=None):
+    global _refboard_opacity_label
     d = _refboard_drag
     if d is None:
         return
@@ -3277,9 +3298,15 @@ def _refboard_drag_update(scene, region, mx, my, event=None):
         # while dragging and lingers ~1s after release.
         item.opacity = min(1.0, max(0.01,
                                     d["op0"] + (mx - sm0[0]) / 300.0))
-        global _refboard_opacity_label
         _refboard_opacity_label = (region.as_pointer(), idx,
-                                  time.time() + 1.0)
+                                  time.time() + 1.0, 'opacity')
+    elif mode == 'saturation':
+        # Shift+RMB: same rate control as opacity, but no floor - 0% is a
+        # perfectly valid (grayscale) value.
+        item.saturation = min(1.0, max(0.0,
+                                       d["sat0"] + (mx - sm0[0]) / 300.0))
+        _refboard_opacity_label = (region.as_pointer(), idx,
+                                  time.time() + 1.0, 'saturation')
     elif mode == 'crop':
         # Slide the edge along its SCREEN-space normal: the visible window
         # moves parallel to itself, then both endpoints map back through
@@ -3398,6 +3425,7 @@ def _refboard_drag_update(scene, region, mx, my, event=None):
 def _refboard_group_drag_update(scene, region, d, mx, my, event):
     """Collective edit: apply one shared transform (about the group bbox
     pivot chosen at drag start) to every member's stored state."""
+    global _refboard_opacity_label
     items = scene.refboard_items
     members = d.get("group_members") or []
     sm0 = d.get("m0_screen", d["m0"])
@@ -3461,14 +3489,15 @@ def _refboard_group_drag_update(scene, region, d, mx, my, event):
             ny = cy + vx * s + vy * c
             items[i].pos = (nx / rw, ny / rh)
             items[i].rotation = r0 + delta
-    elif mode == 'group_opacity':
+    elif mode in ('group_opacity', 'group_saturation'):
+        attr = 'saturation' if mode == 'group_saturation' else 'opacity'
+        floor = 0.0 if attr == 'saturation' else 0.01
         delta = (mx - sm0[0]) / 300.0
         for i, _p0, _s0, _r0, _c0, o0 in members:
             if i < len(items):
-                items[i].opacity = min(1.0, max(0.01, o0 + delta))
-        global _refboard_opacity_label
+                setattr(items[i], attr, min(1.0, max(floor, o0 + delta)))
         _refboard_opacity_label = (region.as_pointer(), -1,
-                                  time.time() + 1.0)
+                                  time.time() + 1.0, attr)
 
 
 # --- neighbor yield -------------------------------------------------------------
@@ -3798,7 +3827,7 @@ def _refboard_board_state(scene):
             (img.filepath_raw or "") if img is not None else "",
             tuple(it.pos), tuple(it.scale), it.rotation,
             tuple(it.crop), tuple(it.crop_pts),
-            it.opacity, it.visible, it.locked,
+            it.opacity, it.saturation, it.visible, it.locked,
             it.flip_x, it.flip_y, tuple(it.home_scale),
         ))
     return (tuple(items), scene.refboard_selected, tuple(_refboard_group))
@@ -3810,7 +3839,7 @@ def _refboard_apply_board_state(scene, st):
     items, sel, grp = st
     coll = scene.refboard_items
     coll.clear()
-    for (name, iname, path, pos, scale, rot, crop, pts, op, vis,
+    for (name, iname, path, pos, scale, rot, crop, pts, op, sat, vis,
          locked, fx, fy, home) in items:
         it = coll.add()
         img = bpy.data.images.get(iname) if iname else None
@@ -3828,6 +3857,7 @@ def _refboard_apply_board_state(scene, st):
         it.crop = crop
         it.crop_pts = pts
         it.opacity = op
+        it.saturation = sat
         it.visible = vis
         it.locked = locked
         it.flip_x = fx
@@ -4238,8 +4268,9 @@ class REFBOARD_OT_interact(bpy.types.Operator):
                     for i, p0, s0, r0, c0, o0 in d["group_members"]:
                         if i < len(scene.refboard_items):
                             it = scene.refboard_items[i]
-                            it.pos, it.scale, it.rotation, it.crop, \
-                                it.opacity = p0, s0, r0, c0, o0
+                            it.pos, it.scale, it.rotation, it.crop = \
+                                p0, s0, r0, c0
+                            setattr(it, d.get("channel", "opacity"), o0)
                 elif d["index"] < len(scene.refboard_items):
                     _refboard_restore(scene.refboard_items[d["index"]], d["snap"])
                     if d["temp"]:
@@ -4328,43 +4359,47 @@ class REFBOARD_OT_interact(bpy.types.Operator):
             if event.value != 'PRESS' or not in_view or \
                     not _refboard_canvas_on:
                 return {'PASS_THROUGH'}
-            if not event.ctrl:
+            if not event.ctrl and not event.shift:
                 # Canvas-mode RMB is ours: the Refboard context menu.
                 _refboard_ctx["region"] = region
                 _refboard_ctx["mouse"] = (event.mouse_region_x,
-                                         event.mouse_region_y)
+                                          event.mouse_region_y)
                 try:
                     bpy.ops.wm.call_menu(name="REFBOARD_MT_ctx")
                 except Exception:
                     pass
                 return {'RUNNING_MODAL'}
+            # Shift+RMB desaturates (left) / re-saturates (right); Ctrl+RMB
+            # fades opacity. Same rate control either way.
+            sat = event.shift and not event.ctrl
+            zone = 'saturation' if sat else 'opacity'
             sel = scene.refboard_selected
             if _refboard_group:
                 _refboard_group_start_drag(
-                    scene, region, 'opacity', -1,
+                    scene, region, zone, -1,
                     event.mouse_region_x, event.mouse_region_y,
-                    'RIGHTMOUSE')
+                    'RIGHTMOUSE', attr=zone)
                 area.tag_redraw()
                 return {'RUNNING_MODAL'}
             if 0 <= sel < len(scene.refboard_items) and \
                     scene.refboard_items[sel].image is not None:
-                _refboard_start_drag(scene, region, sel, 'opacity', -1,
+                _refboard_start_drag(scene, region, sel, zone, -1,
                                     event.mouse_region_x,
                                     event.mouse_region_y, 'RIGHTMOUSE')
                 area.tag_redraw()
                 return {'RUNNING_MODAL'}
-            # Nothing selected: Ctrl+RMB is a board-wide opacity drag -
-            # every ref shifts by the same delta, keeping relative
-            # opacities. Reuses the collective opacity math.
+            # Nothing selected: board-wide drag - every ref shifts by the
+            # same delta, keeping relative values. Reuses the collective
+            # math.
             members = [(i, tuple(it.pos), tuple(it.scale), it.rotation,
-                        tuple(it.crop), it.opacity)
+                        tuple(it.crop), getattr(it, zone))
                        for i, it in enumerate(scene.refboard_items)
                        if it.image is not None]
             if not members:
                 return {'PASS_THROUGH'}
             _refboard_drag_set({
                 "index": -1,
-                "mode": "group_opacity",
+                "mode": "group_" + zone,
                 "sub": -1,
                 "temp": False,
                 "moved": False,
@@ -4372,6 +4407,7 @@ class REFBOARD_OT_interact(bpy.types.Operator):
                 "m0_screen": (event.mouse_region_x, event.mouse_region_y),
                 "button": 'RIGHTMOUSE',
                 "snap": None,
+                "channel": zone,
                 "group_members": members,
             })
             area.tag_redraw()
@@ -4752,8 +4788,8 @@ class REFBOARD_MT_ctx(bpy.types.Menu):
 
 def _refboard_reset_item(scene, idx):
     """Straighten the ref: rotation and flips back to neutral, opacity
-    to full and the full uncropped frame. Size and position are kept
-    as they are."""
+    and saturation to full, and the full uncropped frame. Size and
+    position are kept as they are."""
     items = scene.refboard_items
     if not (0 <= idx < len(items)):
         return False
@@ -4761,6 +4797,7 @@ def _refboard_reset_item(scene, idx):
     item.rotation = 0.0
     item.flip_x = item.flip_y = False
     item.opacity = 1.0
+    item.saturation = 1.0
     _refboard_crop_commit(item, [(0.0, 0.0), (1.0, 0.0),
                                  (1.0, 1.0), (0.0, 1.0)])
     return True
@@ -5147,6 +5184,8 @@ class REFBOARD_PT_board(bpy.types.Panel):
         sel = getattr(scene, "refboard_selected", -1)
         if items and 0 <= sel < len(items):
             col.prop(items[sel], "opacity", text="Image Opacity",
+                     slider=True)
+            col.prop(items[sel], "saturation", text="Image Saturation",
                      slider=True)
         if items:
             col.template_list(
