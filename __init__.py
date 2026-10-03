@@ -2907,6 +2907,32 @@ def _refboard_finish(p):
     _refboard_undo_push("Refboard Paste")
 
 
+def _refboard_status(msg, duration=3.0):
+    """Native bottom status-bar message.
+
+    WorkSpace.status_text_set writes the same bar that shows key hints /
+    "No objects to paste" reports (context.window has no such method - an
+    earlier version silently died on that AttributeError). The text
+    persists until cleared, so a one-shot timer restores the bar.
+    """
+    try:
+        ws = getattr(bpy.context, "workspace", None)
+        if ws is None:
+            return
+        ws.status_text_set(msg)
+        def _clear():
+            try:
+                w = getattr(bpy.context, "workspace", None)
+                if w is not None:
+                    w.status_text_set(None)
+            except Exception:
+                pass
+            return None
+        bpy.app.timers.register(_clear, first_interval=duration)
+    except Exception:
+        pass
+
+
 def _refboard_poll_timer():
     if not _refboard_pending:
         return None
@@ -2931,6 +2957,7 @@ def _refboard_poll_timer():
             _refboard_finish(p)
         except Exception as e:
             print("Refboard paste failed:", e)
+            _refboard_status("Refboard: %s" % e)
     if not _refboard_pending:
         return None
     # Repaint every tick so the bar moves instead of stepping between the
@@ -4605,7 +4632,11 @@ class REFBOARD_OT_interact(bpy.types.Operator):
                     # operator's own gate reports "no image" (status-bar
                     # toast) and cancels - the key stays consumed either
                     # way, so Blender's object paste can't fire in edit
-                    # mode.
+                    # mode. Nested-op reports don't always surface a
+                    # toast, so status_text_set covers the bar too.
+                    if not _refboard_clipboard_has_image():
+                        _refboard_status(
+                            "Refboard: no image on the clipboard")
                     try:
                         bpy.ops.refboard.paste('INVOKE_DEFAULT')
                     except Exception:
