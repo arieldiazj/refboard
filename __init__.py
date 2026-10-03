@@ -4911,12 +4911,18 @@ class REFBOARD_OT_paste(bpy.types.Operator):
         # Screen-space only now; the 3D/Screen menu is kept around below
         # (do_paste still accepts mode='3D') but no longer invoked.
         try:
-            return bpy.ops.refboard.do_paste(mode='SCREEN')
+            r = bpy.ops.refboard.do_paste(mode='SCREEN')
         except RuntimeError:
             # ERROR reports inside do_paste surface as RuntimeError when
-            # called via bpy.ops - the report already happened, so just
-            # cancel cleanly instead of leaking a traceback.
-            return {'CANCELLED'}
+            # called via bpy.ops.
+            r = {'CANCELLED'}
+        if 'CANCELLED' in r:
+            # Re-report on THIS op: the toast only fires for reports on
+            # the operator the keymap actually dispatched, not nested
+            # calls two levels down.
+            self.report({'WARNING'},
+                        "Refboard: no image on the clipboard")
+        return r
 
 
 class REFBOARD_OT_do_paste(bpy.types.Operator):
