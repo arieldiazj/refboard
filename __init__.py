@@ -2823,6 +2823,8 @@ def _refboard_finish(p):
     dst = p["dst"]
     st = p.get("state") or {}
     if not os.path.isfile(dst) or os.path.getsize(dst) == 0:
+        if st.get("clipboard"):
+            raise RuntimeError("no image on the clipboard")
         return
     img = _refboard_adopt(dst)
     # size access forces the lazy decode: a garbage payload keeps (0, 0).
@@ -2837,9 +2839,11 @@ def _refboard_finish(p):
             bpy.data.images.remove(img)
         except Exception:
             pass
+        # Clipboard refusals all read the same to the user: nothing
+        # pastable was on the clipboard.
         raise RuntimeError(
-            "clipboard image could not be decoded" if bad else
-            "clipboard image looks like an icon (<=64px)")
+            "no image on the clipboard" if st.get("clipboard")
+            else "image could not be decoded")
     if not st.get("filepath") and not img.name.startswith("Refboard"):
         img.name = "Refboard"
     if p["mode"] == 'SCREEN':
@@ -4939,7 +4943,7 @@ class REFBOARD_OT_do_paste(bpy.types.Operator):
             try:
                 _refboard_finish({"dst": fp, "mode": self.mode, "state": st})
             except Exception as e:
-                self.report({'ERROR'}, "Image load failed: %s" % e)
+                self.report({'ERROR'}, "Refboard: %s" % e)
                 _refboard_status("Refboard: %s" % e)
                 return {'CANCELLED'}
             _refboard_redraw_views()
@@ -4962,7 +4966,7 @@ class REFBOARD_OT_do_paste(bpy.types.Operator):
                     _refboard_finish({"dst": hit, "mode": self.mode,
                                       "state": st})
                 except Exception as e:
-                    self.report({'ERROR'}, "Image load failed: %s" % e)
+                    self.report({'ERROR'}, "Refboard: %s" % e)
                     _refboard_status("Refboard: %s" % e)
                     return {'CANCELLED'}
                 _refboard_redraw_views()
