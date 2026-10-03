@@ -7,7 +7,9 @@ import shutil
 import struct
 import subprocess
 import tempfile
+import threading
 import time
+import zipfile
 import ctypes
 import uuid
 from mathutils import Vector, Matrix
@@ -88,6 +90,10 @@ class RefboardPreferences(bpy.types.AddonPreferences):
         row = col.row(align=True)
         row.prop(self, "veil_color", text="Veil")
         row.prop(self, "veil_alpha", text="", slider=True)
+        row = col.row(align=True)
+        row.operator("refboard.update_check", icon='FILE_REFRESH')
+        if _refboard_update.get("msg"):
+            col.label(text=_refboard_update["msg"])
 
 
 # --- image repository ---------------------------------------------------------
@@ -4693,6 +4699,137 @@ class REFBOARD_OT_externalize(bpy.types.Operator):
         return {'FINISHED'}
 
 
+# --- self-update ------------------------------------------------------------
+
+_REFBOARD_GH_REPO = "arieldiazj/refboard"
+_refboard_update = {"state": "idle", "msg": ""}
+
+
+def _refboard_parse_ver(name):
+    """'v0.2.0' -> (0, 2, 0) padded to 3; anything unparseable -> None."""
+    t = (name or "").strip().lower()
+    if t.startswith('v'):
+        t = t[1:]
+    parts = t.split('.')
+    if not parts or len(parts) > 4:
+        return None
+    try:
+        v = tuple(int(p) for p in parts)
+    except ValueError:
+        return None
+    return v + (0,) * (3 - len(v)) if len(v) < 3 else v
+
+
+def _refboard_latest_tag(tags):
+    """Max semver entry of a /tags API payload -> (version_tuple, tag_dict)."""
+    best = None
+    for t in tags or []:
+        v = _refboard_parse_ver(t.get("name"))
+        if v is not None and (best is None or v > best[0]):
+            best = (v, t)
+    return best
+
+
+def _refboard_gh_get(url):
+    import urllib.request
+    req = urllib.request.Request(
+        url, headers={"User-Agent": "refboard-addon-updater"})
+    with urllib.request.urlopen(req, timeout=30) as r:
+        return r.read()
+
+
+def _refboard_install_zip(zip_path, addon_dir):
+    """Overlay a tag zipball onto addon_dir after zipping the current files
+    into _backups/ (built in temp first so the archive doesn't capture
+    itself). The zip nests under <user>-<repo>-<sha>/, which is stripped."""
+    ver = ".".join(str(x) for x in bl_info.get("version", (0, 0, 0)))
+    fd, tmpzip = tempfile.mkstemp(suffix=".zip", prefix="refboard_bak_")
+    os.close(fd)
+    os.remove(tmpzip)
+    shutil.make_archive(tmpzip[:-4], 'zip', addon_dir)
+    bk = os.path.join(addon_dir, "_backups")
+    os.makedirs(bk, exist_ok=True)
+    shutil.move(tmpzip, os.path.join(
+        bk, "refboard_v%s_%s.zip" % (ver, time.strftime("%Y%m%d_%H%M%S"))))
+    with zipfile.ZipFile(zip_path) as z:
+        roots = {n.split('/')[0] for n in z.namelist() if '/' in n}
+        root = roots.pop() if len(roots) == 1 else ''
+        for n in z.namelist():
+            rel = n[len(root):].lstrip('/') if root and n.startswith(root) else n
+            if not rel or n.endswith('/') or rel.startswith(('.git', '_backups')):
+                continue
+            dst = os.path.join(addon_dir, *rel.split('/'))
+            os.makedirs(os.path.dirname(dst), exist_ok=True)
+            with z.open(n) as src, open(dst, 'wb') as out:
+                shutil.copyfileobj(src, out)
+
+
+def _refboard_update_worker():
+    try:
+        import json
+        raw = _refboard_gh_get(
+            "https://api.github.com/repos/%s/tags" % _REFBOARD_GH_REPO)
+        best = _refboard_latest_tag(json.loads(raw.decode('utf8')))
+        local = tuple(bl_info.get("version", (0, 0, 0)))
+        if best is None:
+            _refboard_update.update(
+                state="done", msg="No tagged versions on GitHub yet.")
+            return
+        ver, tag = best
+        vstr = ".".join(str(x) for x in ver)
+        if ver <= local:
+            _refboard_update.update(
+                state="done",
+                msg="Refboard is up to date (v%s)." %
+                    ".".join(str(x) for x in local))
+            return
+        _refboard_update.update(state="busy", msg="Downloading v%s..." % vstr)
+        zdata = _refboard_gh_get(tag.get("zipball_url"))
+        zp = os.path.join(tempfile.gettempdir(), "refboard_update.zip")
+        with open(zp, "wb") as f:
+            f.write(zdata)
+        _refboard_update.update(state="busy", msg="Installing v%s..." % vstr)
+        _refboard_install_zip(zp, os.path.dirname(os.path.abspath(__file__)))
+        _refboard_update.update(
+            state="done",
+            msg="Updated to v%s - restart Blender to load it." % vstr)
+    except Exception as e:
+        _refboard_update.update(state="error", msg="Update failed: %s" % e)
+
+
+def _refboard_update_poll():
+    try:
+        for w in bpy.context.window_manager.windows:
+            for a in (w.screen.areas if w.screen else ()):
+                if a.type == 'PREFERENCES':
+                    a.tag_redraw()
+    except Exception:
+        pass
+    return 0.25 if _refboard_update.get("state") == "busy" else None
+
+
+class REFBOARD_OT_update_check(bpy.types.Operator):
+    """Check GitHub for a newer tagged version. Installs it over the addon
+    (with a timestamped zip backup first) and asks for a restart. Never
+    runs when the remote version is not strictly newer."""
+    bl_idname = "refboard.update_check"
+    bl_label = "Refboard Update"
+    bl_options = {'INTERNAL'}
+
+    @classmethod
+    def poll(cls, context):
+        return _refboard_update.get("state") != "busy"
+
+    def execute(self, context):
+        _refboard_update.update(state="busy", msg="Checking GitHub...")
+        threading.Thread(target=_refboard_update_worker, daemon=True).start()
+        try:
+            bpy.app.timers.register(_refboard_update_poll)
+        except Exception:
+            pass
+        return {'FINISHED'}
+
+
 classes = (
     RefboardItem,
     RefboardPreferences,
@@ -4706,6 +4843,7 @@ classes = (
     REFBOARD_OT_toggle,
     REFBOARD_OT_clear,
     REFBOARD_OT_arrange_auto,
+    REFBOARD_OT_update_check,
     REFBOARD_OT_reset,
     REFBOARD_OT_reset_crop,
     REFBOARD_MT_paste,

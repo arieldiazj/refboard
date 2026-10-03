@@ -1639,6 +1639,47 @@ def main():
           ct._refboard_poll_timer() is None)
 
     # ------------------------------------------------------------------
+    section("P11 self-update helpers")
+    check("parse v0.2.0",
+          ct._refboard_parse_ver("v0.2.0") == (0, 2, 0))
+    check("parse bare version",
+          ct._refboard_parse_ver("1.4") == (1, 4, 0))
+    check("parse junk is None",
+          ct._refboard_parse_ver("v.01") is None and
+          ct._refboard_parse_ver("latest") is None and
+          ct._refboard_parse_ver("") is None)
+    tags = [{"name": "v0.1.0"}, {"name": "v.01"},
+            {"name": "v0.10.0"}, {"name": "v0.9.9"}]
+    best = ct._refboard_latest_tag(tags)
+    check("latest tag is semver max",
+          best is not None and best[0] == (0, 10, 0),
+          str(best[0] if best else None))
+    check("latest tag empty payload",
+          ct._refboard_latest_tag([]) is None and
+          ct._refboard_latest_tag([{"name": "junk"}]) is None)
+
+    # install: zip with a GitHub-style nested root overlays cleanly and
+    # leaves a backup zip in _backups/
+    inst_dir = os.path.join(tmp, "inst_addon")
+    os.makedirs(inst_dir, exist_ok=True)
+    with open(os.path.join(inst_dir, "__init__.py"), "w") as f:
+        f.write("OLD_MARKER")
+    zp = os.path.join(tmp, "upd.zip")
+    import zipfile as _zf
+    with _zf.ZipFile(zp, "w") as z:
+        z.writestr("arieldiazj-refboard-deadbeef/__init__.py", "NEW_MARKER")
+        z.writestr("arieldiazj-refboard-deadbeef/tests/t.py", "TEST_FILE")
+        z.writestr("arieldiazj-refboard-deadbeef/.gitignore", "*.tmp")
+    ct._refboard_install_zip(zp, inst_dir)
+    check("install overlays __init__.py",
+          open(os.path.join(inst_dir, "__init__.py")).read() == "NEW_MARKER")
+    check("install extracts nested paths",
+          os.path.isfile(os.path.join(inst_dir, "tests", "t.py")))
+    bks = os.listdir(os.path.join(inst_dir, "_backups"))
+    check("install writes a backup zip",
+          len(bks) == 1 and bks[0].startswith("refboard_v"), str(bks))
+
+    # ------------------------------------------------------------------
     print(f"\n=== RESULT: {PASS_COUNT} passed, {FAIL_COUNT} failed ===",
           flush=True)
     return 1 if FAIL_COUNT else 0
