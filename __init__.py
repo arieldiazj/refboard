@@ -2942,11 +2942,15 @@ def _refboard_status(msg, duration=3.0):
 def _refboard_report_no_image():
     """Zero-delay timer: run the paste op outside the modal event so its
     report travels the normal dispatch path (reports raised by an op
-    invoked *inside* a modal handler aren't guaranteed a toast)."""
-    try:
-        bpy.ops.refboard.paste('INVOKE_DEFAULT')
-    except Exception as e:
-        print("Refboard paste failed:", e)
+    invoked *inside* a modal handler aren't guaranteed a toast).
+    EXEC_DEFAULT needs no live event (a timer has none); if even that is
+    rejected, fall back to INVOKE before giving up."""
+    for ctx in ('EXEC_DEFAULT', 'INVOKE_DEFAULT'):
+        try:
+            bpy.ops.refboard.paste(ctx)
+            return None
+        except Exception as e:
+            print("Refboard paste report failed (%s):" % ctx, e)
     return None
 
 
@@ -4665,7 +4669,10 @@ class REFBOARD_OT_interact(bpy.types.Operator):
                                 _refboard_report_no_image,
                                 first_interval=0.0)
                         except Exception:
-                            pass
+                            try:
+                                bpy.ops.refboard.paste('EXEC_DEFAULT')
+                            except Exception:
+                                pass
                 else:
                     _refboard_copy_selected(scene)
             return {'RUNNING_MODAL'}
