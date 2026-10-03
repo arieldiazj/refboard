@@ -2939,21 +2939,6 @@ def _refboard_status(msg, duration=3.0):
         pass
 
 
-def _refboard_report_no_image():
-    """Zero-delay timer: run the paste op outside the modal event so its
-    report travels the normal dispatch path (reports raised by an op
-    invoked *inside* a modal handler aren't guaranteed a toast).
-    EXEC_DEFAULT needs no live event (a timer has none); if even that is
-    rejected, fall back to INVOKE before giving up."""
-    for ctx in ('EXEC_DEFAULT', 'INVOKE_DEFAULT'):
-        try:
-            bpy.ops.refboard.paste(ctx)
-            return None
-        except Exception as e:
-            print("Refboard paste report failed (%s):" % ctx, e)
-    return None
-
-
 def _refboard_poll_timer():
     if not _refboard_pending:
         return None
@@ -4649,13 +4634,13 @@ class REFBOARD_OT_interact(bpy.types.Operator):
             if event.ctrl and not event.shift and not event.alt:
                 if event.type == 'V':
                     # Same path as the Ctrl+V keymap item, driven from
-                    # here because canvas mode swallows keymap input. The
-                    # key stays consumed either way, so Blender's object
-                    # paste can't fire in edit mode. With an image the op
-                    # runs nested (keeps the cursor position); without one
-                    # it's deferred to a timer so the report toast goes
-                    # through normal dispatch, with status_text_set as a
-                    # second native channel.
+                    # here because canvas mode swallows keymap input.
+                    # With an image the op runs nested so the ref lands
+                    # under the cursor. With none, the key passes through
+                    # to the keymap: reports only toast when dispatched
+                    # from a real event, so whichever op wins (ours, or
+                    # Blender's object.paste) emits the native "nothing to
+                    # paste" toast + Info entry.
                     if _refboard_clipboard_has_image():
                         try:
                             bpy.ops.refboard.paste('INVOKE_DEFAULT')
@@ -4664,15 +4649,7 @@ class REFBOARD_OT_interact(bpy.types.Operator):
                     else:
                         _refboard_status(
                             "Refboard: no image on the clipboard")
-                        try:
-                            bpy.app.timers.register(
-                                _refboard_report_no_image,
-                                first_interval=0.0)
-                        except Exception:
-                            try:
-                                bpy.ops.refboard.paste('EXEC_DEFAULT')
-                            except Exception:
-                                pass
+                        return {'PASS_THROUGH'}
                 else:
                     _refboard_copy_selected(scene)
             return {'RUNNING_MODAL'}
@@ -4894,11 +4871,18 @@ class REFBOARD_OT_paste(bpy.types.Operator):
     bl_options = {'INTERNAL'}
 
     def invoke(self, context, event):
-        # Refboard must never hijack a paste outside edit mode:
-        # PASS_THROUGH lets the keymap keep matching so Blender's own
-        # paste (objects, drivers, ...) runs instead.
+        # Refboard must never hijack a paste outside edit mode. This op's
+        # keymap items can outrank Blender's own Ctrl+V bindings, so
+        # replay the default ourselves (object.paste reports "No objects
+        # to paste" natively). Modes without an object paste swallow the
+        # key, same as before.
         if not _refboard_canvas_on:
-            return {'PASS_THROUGH'}
+            if getattr(context, "mode", None) == 'OBJECT':
+                try:
+                    return bpy.ops.object.paste()
+                except Exception:
+                    pass
+            return {'CANCELLED'}
         if not _refboard_clipboard_has_image():
             # Inside edit mode the key belongs to Refboard: no image means
             # "nothing to paste", not "defer to Blender's object paste".
@@ -5468,6 +5452,15 @@ def register():
                 "refboard.paste", type='V', value='PRESS',
                 **{paste: True})
             _refboard_keymaps.append((km, kmi))
+            # Also bind in the Object Mode map: modal Ctrl+V with no
+            # image passes through to the keymap, and this wins over
+            # Blender's object.paste so the Refboard report is the one
+            # that toasts (and object pastes can't slip behind the veil).
+            km_obj = kc.keymaps.new(name="Object Mode")
+            kmi = km_obj.keymap_items.new(
+                "refboard.paste", type='V', value='PRESS',
+                **{paste: True})
+            _refboard_keymaps.append((km_obj, kmi))
             kmi = km.keymap_items.new(
                 "refboard.toggle_all", type='V', value='PRESS',
                 ctrl=True, shift=True)
