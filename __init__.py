@@ -4910,7 +4910,13 @@ class REFBOARD_OT_paste(bpy.types.Operator):
         }
         # Screen-space only now; the 3D/Screen menu is kept around below
         # (do_paste still accepts mode='3D') but no longer invoked.
-        return bpy.ops.refboard.do_paste(mode='SCREEN')
+        try:
+            return bpy.ops.refboard.do_paste(mode='SCREEN')
+        except RuntimeError:
+            # ERROR reports inside do_paste surface as RuntimeError when
+            # called via bpy.ops - the report already happened, so just
+            # cancel cleanly instead of leaking a traceback.
+            return {'CANCELLED'}
 
 
 class REFBOARD_OT_do_paste(bpy.types.Operator):
@@ -4933,7 +4939,7 @@ class REFBOARD_OT_do_paste(bpy.types.Operator):
             try:
                 _refboard_finish({"dst": fp, "mode": self.mode, "state": st})
             except Exception as e:
-                self.report({'ERROR'}, "Refboard: %s" % e)
+                self.report({'WARNING'}, "Refboard: %s" % e)
                 _refboard_status("Refboard: %s" % e)
                 return {'CANCELLED'}
             _refboard_redraw_views()
@@ -4956,7 +4962,7 @@ class REFBOARD_OT_do_paste(bpy.types.Operator):
                     _refboard_finish({"dst": hit, "mode": self.mode,
                                       "state": st})
                 except Exception as e:
-                    self.report({'ERROR'}, "Refboard: %s" % e)
+                    self.report({'WARNING'}, "Refboard: %s" % e)
                     _refboard_status("Refboard: %s" % e)
                     return {'CANCELLED'}
                 _refboard_redraw_views()
